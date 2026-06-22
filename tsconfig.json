@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "rootDir": ".",
+    "paths": {
+      "@pinge/react-native-steps": [
+        "./src/index"
+      ]
+    },
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "customConditions": [
+      "pinge-react-native-steps-source",
+      "react-native-strict-api"
+    ],
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "lib": [
+      "ESNext"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ESNext",
+    "types": [
+      "jest"
+    ],
+    "verbatimModuleSyntax": true
+  },
+  "ts-node": {
+    "compilerOptions": {
+      "verbatimModuleSyntax": false
+    }
+  }
+}
