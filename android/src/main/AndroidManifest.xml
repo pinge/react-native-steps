@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+  <!--
+    Background step counting via a foreground service. Each permission/attribute
+    below is only enforced on newer API levels and is ignored on minSdk 24/25:
+    - FOREGROUND_SERVICE (API 28+)
+    - FOREGROUND_SERVICE_HEALTH + health type (API 34+)
+    - POST_NOTIFICATIONS (API 33+)
+  -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!--
+    Neither sensor feature is required: a consuming app should not be hidden from the
+    Play Store just for depending on this library. The hardware pedometer is optional
+    (we fall back to the accelerometer), and the accelerometer is left non-required so
+    apps where step counting is a secondary feature still ship to devices without one.
+    The runtime degrades gracefully when a sensor is absent (SensorStepCounter emits an
+    error instead of crashing). An app that wants stricter distribution can override
+    `required` to "true" via `tools:replace`.
+  -->
+  <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
+  <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+
+  <application>
+    <service
+      android:name=".services.StepsForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="health" />
+  </application>
+
+</manifest>

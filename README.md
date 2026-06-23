@@ -11,10 +11,10 @@ npm install @pinge/react-native-steps
 ## Usage
 
 ```ts
-import { start } from '@pinge/react-native-steps';
+import { startCounting } from '@pinge/react-native-steps';
 
 // ...
-start({
+startCounting({
   onStep: (event) => {
     console.log(`Total steps: ${event.steps}`);
     console.log(`Sensor type: ${event.sensor}`);
