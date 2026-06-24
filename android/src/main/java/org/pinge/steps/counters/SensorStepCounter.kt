@@ -4,6 +4,9 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import com.facebook.react.bridge.WritableMap
 
@@ -22,7 +25,7 @@ abstract class SensorStepCounter(
   abstract val sensorType: Int
 
   /**
-   * Represents the sampling 'rate' that android.hardware.SensorEvent are delivered at. This is
+   * Represents the sampling rate that android.hardware.SensorEvent are delivered at. This is
    * only a hint, as events may be received faster (the usual) or slower than the specified rate.
    *
    * Can be one of the following:
@@ -81,6 +84,24 @@ abstract class SensorStepCounter(
   private val endDate: Long
     get() = System.currentTimeMillis()
 
+  // Background thread that SensorManager delivers sensor events on, so onSensorChanged() (and the
+  // step detection it drives, up to ~50 Hz for the accelerometer fallback) never runs on the main
+  // thread. Created in registerSensor() and torn down in stopService(), null while not registered.
+  private var sensorThread: HandlerThread? = null
+
+  // Detection runs on sensorThread, but the resulting step is delivered to the sink on the main
+  // thread. This keeps the downstream emit/persist/notify pipeline (StepsForegroundService and its
+  // fields) single-threaded as it was before sensor delivery moved off the main thread, so only the
+  // hot detection path is off main and no cross thread field synchronization is needed downstream.
+  private val mainThreadHandler = Handler(Looper.getMainLooper())
+
+  // Whether this counter is registered and should still deliver steps. Cleared in stopService() and
+  // checked inside the main thread emit runnable, so a step the sensor thread posts after teardown is
+  // dropped rather than re-firing the pipeline (e.g. re-posting a cancelled notification). We use
+  // Volatile here because start/stop may run off the main thread (the in-process fallback is driven
+  // from the module's @ReactMethod calls) while the guard is read on the main thread.
+  @Volatile private var registered = false
+
   fun startService(start: Long) {
     startDate = start.takeIf { it > 0 } ?: System.currentTimeMillis()
     resetSessionState()
@@ -99,24 +120,36 @@ abstract class SensorStepCounter(
 
   private fun registerSensor() {
     val sensor = detectedSensor
-    // If there is no sensor of this type on the device because getDefaultSensor() returned null,
-    // we bail safely instead of crashing, and the session becomes a no-op.
+    // If there is no sensor of this type on the device because getDefaultSensor() returned
+    // null, we bail safely instead of crashing, and the session becomes a no-op.
     if (sensor == null) {
       Log.w(TAG_NAME, "No $sensorTypeString sensor available; not registering a listener")
       sink.emitError("No $sensorTypeString sensor available")
       return
     }
-    sensorManager.registerListener(this, sensor, samplingPeriod)
+    // Deliver sensor events on a dedicated background thread instead of the main thread.
+    val thread = HandlerThread("StepCounterSensor").also { it.start() }
+    sensorThread = thread
+    registered = true
+    sensorManager.registerListener(this, sensor, samplingPeriod, Handler(thread.looper))
   }
 
   fun stopService() {
+    registered = false
     sensorManager.unregisterListener(this)
+    // Quit the delivery thread safely after unregistering so no further events are dispatched to it.
+    sensorThread?.quitSafely()
+    sensorThread = null
+    // Drop any emitted step already posted to the main thread. Events that the sensor thread posts
+    // after this point are still dropped by the 'registered' guard in the onSensorChanged() emit runnable.
+    mainThreadHandler.removeCallbacksAndMessages(null)
   }
 
   /**
-   * Called when there is a new sensor event.  Note that "on changed" is somewhat of a misnomer,
-   * as this will also be called if we have a new reading from a sensor with the exact same sensor
-   * values (but a newer timestamp).
+   * Called when there is a new sensor event. Note that "on changed" is somewhat of a misnomer,
+   * as this method will also be called if we have a new reading from a sensor with the exact
+   * same sensor values (but a newer timestamp).
+   *
    * Check the following links for details on available sensor types and events:
    * - https://developer.android.com/reference/android/hardware/SensorManager
    * - https://developer.android.com/reference/android/hardware/SensorEvent
@@ -139,8 +172,18 @@ abstract class SensorStepCounter(
     ) {
       return
     }
-    if (hasDetectedStep(event.values)) {
-      sink.emitStep(stepsParamsMap)
+    // SensorEvent.timestamp is nanoseconds since boot (an "uptime" clock), not since the Unix epoch,
+    // and the exact base is not guaranteed across devices, so it can't be turned into a wall clock
+    // time; only differences between two timestamps are meaningful. That is all the walking cadence
+    // cap needs, and it reflects when the reading occurred, so it is more accurate than wall clock at
+    // processing time when the OS batches sensor deliveries.
+    if (hasDetectedStep(event.values, event.timestamp)) {
+      // We build the payload here on the sensor thread since it reads the counter state that is mutated
+      // only on this thread. Then we hand over the immutable map to the main thread for emitting. The
+      // 'registered' guard drops a step that lands after stopService() so the pipeline is not touched
+      // after teardown.
+      val payload = stepsParamsMap
+      mainThreadHandler.post { if (registered) sink.emitStep(payload) }
     }
   }
 
@@ -148,9 +191,8 @@ abstract class SensorStepCounter(
    * Processes one raw sensor reading and returns whether it completed a step or not. Implemented
    * in PedometerStepCounter and AccelerometerStepCounter with different motion sensor handling
    * algorithms. Both implementations update their internal step count as a side effect.
-   * @return `true` when this reading completes a new step (and a step event should be emitted).
    */
-  abstract fun hasDetectedStep(eventData: FloatArray): Boolean
+  abstract fun hasDetectedStep(eventData: FloatArray, eventTime: Long): Boolean
 
   /**
    * Called when the accuracy of the registered sensor has changed. Unlike onSensorChanged(),
