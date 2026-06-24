@@ -31,8 +31,8 @@ class ReactNativeStepsModule(reactContext: ReactApplicationContext) : NativeReac
   }
 
   @ReactMethod
-  override fun start(from: Double, notification: ReadableMap, cadence: Double) {
-    coordinator.start(from.toLong(), StepsNotificationOptions.from(notification), Cadence.sanitize(cadence))
+  override fun start(since: Double, notification: ReadableMap, cadence: Double) {
+    coordinator.start(since.toLong(), StepsNotificationOptions.from(notification), Cadence.sanitize(cadence))
   }
 
   @ReactMethod
