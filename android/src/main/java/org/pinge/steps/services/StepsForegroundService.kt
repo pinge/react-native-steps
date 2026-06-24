@@ -97,56 +97,106 @@ class StepsForegroundService : Service(), StepsEventSink {
     startForeground()
 
     if (intent?.action == ACTION_STOP) {
-      stopCounting(clear = true)
-      stopSelf()
+      // stop() acts as a session pause, not a terminate. It stops the sensor and leaves the foreground,
+      // but does not clear the persisted session. A later start() with the same 'since' resumes the
+      // running total from it (see handleExplicitStart()). A start() with a different 'since' (e.g. the
+      // first one after midnight) overwrites it with a fresh session. So the reset is driven by 'since'
+      // changing, and there is no separate terminate path.
+      stopCounting()
+      // We use stopSelf(startId) here and not stopSelf(). During a quick stop()->start() restart a newer
+      // ACTION_START has already advanced the start id, so this becomes a no-op and the service instance
+      // is not destroyed. That keeps the bound instance (and the live callback attached to it) alive
+      // across the restart, so onStep keeps firing. The unconditional stopSelf() would instead tore the
+      // counting instance down, and JavaScript only recovers dozens of seconds later once START_STICKY
+      // restarted and re-bounded the instance. When this really is a terminate (no start racing condition),
+      // startId is the latest, so the service stops.
+      stopSelf(startId)
       return START_NOT_STICKY
     }
 
-    // A null intent is a sticky restart after the process was killed: resume any persisted session.
+    // A null intent is a sticky restart after the process was killed with no session to resume:
+    // nothing to do, so stop instead of lingering as an empty foreground service.
     if (intent == null && !store.isActive) {
-      stopCounting(clear = false)
+      stopCounting()
       stopSelf()
       return START_NOT_STICKY
     }
 
-    // For an explicit start with no active session, begin a fresh one at the requested timestamp.
-    // Otherwise (active session, or sticky restart) resume the persisted session as is.
-    val freshStart =
-      if (intent?.action == ACTION_START && !store.isActive) {
-        intent.getLongExtra(EXTRA_SESSION_START, System.currentTimeMillis())
-      } else {
-        null
-      }
-
-    ensureCounting(freshStart)
+    if (intent?.action == ACTION_START) {
+      handleExplicitStart(intent.getLongExtra(EXTRA_SESSION_START, System.currentTimeMillis()))
+    } else {
+      // A null intent with a persisted active session means a sticky restart after a process kill.
+      // Rebuilds the counter from the persisted session as is (config already loaded from the
+      // store by resolve*()).
+      restoreCounter(store.sessionStart, store.rawCheckpoint, store.accumulatedSteps)
+    }
     return START_STICKY
   }
 
-  // Lazily create the counting strategy and register the sensor. This is idempotent, meaning
-  // that if counting is already running in this process it only replays the current total.
-  private fun ensureCounting(freshStart: Long?) {
-    if (listener != null) {
-      replayCurrent()
-      return
-    }
-    val manager = sensorManager ?: return
-
-    // 'cadence' is already resolved (intent on fresh start, store on sticky restart) by
-    // resolveCadenceConfig() in onStartCommand(), so both paths construct the counter with
-    // the same cadence.
-    val service = StepCounterFactory.create(this, manager, this, cadence)
-    listener = service
-
-    if (store.isActive) {
-      service.restoreService(store.sessionStart, store.rawCheckpoint, store.accumulatedSteps)
+  // Handles an explicit start() for the requested session start. Resumes the running
+  // total when it matches the active session, otherwise begins a fresh session at 0.
+  private fun handleExplicitStart(requestedStart: Long) {
+    if (store.isActive && store.sessionStart == requestedStart) {
+      resumeSession()
     } else {
-      val start = freshStart ?: System.currentTimeMillis()
-      store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, cadence)
-      service.startService(start)
+      startFreshSession(requestedStart)
     }
   }
 
-  // Populate the in-memory notification strings: from the intent extras on a fresh start, otherwise
+  // Resumes the active session. Keeps the running total and the original session 'start', but
+  // adopts the new notification/cadence. Cadence is intrinsic to a counter (the accelerometer
+  // derives an absolute step-interval floor from it, the pedometer caps per reading), so a
+  // cadence change requires rebuilding the counter. We do this via restoreCounter() so the
+  // running total carries across untouched.
+  private fun resumeSession() {
+    // store.cadence still holds the cap the running counter was built with (updated only here
+    // or on a fresh start()), so we compare them before persisting the new value.
+    val cadenceChanged = store.cadence != cadence
+    persistConfig()
+    val current = listener
+    when {
+      current == null -> restoreCounter(store.sessionStart, store.rawCheckpoint, store.accumulatedSteps)
+      cadenceChanged -> restoreCounter(store.sessionStart, current.rawCheckpoint, current.currentSteps)
+      // If we're already counting with the same cadence, just replay the current total.
+      else -> replayCurrent()
+    }
+  }
+
+  // Begins a brand new session at 'start', resetting the running total to 0 and adopting the new config.
+  private fun startFreshSession(start: Long) {
+    stopListener()
+    val service = createCounter() ?: return
+    store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, cadence)
+    service.startService(start)
+  }
+
+  // Builds or rebuilds the step counter and seeds it to a running total without resetting it.
+  // This is used to resume sessions and for sticky restarts. Stops any existing counter first
+  // so the new one (built with the current cadence) owns the sensor. The total/baseline carry
+  // across via restoreService().
+  private fun restoreCounter(start: Long, checkpoint: Double, accumulated: Double) {
+    stopListener()
+    val service = createCounter() ?: return
+    service.restoreService(start, checkpoint, accumulated)
+  }
+
+  private fun createCounter(): SensorStepCounter? {
+    val manager = sensorManager ?: return null
+    return StepCounterFactory.create(this, manager, this, cadence).also { listener = it }
+  }
+
+  private fun stopListener() {
+    listener?.stopService()
+    listener = null
+  }
+
+  // Persists the (possibly updated) notification + cadence so a later sticky restart uses the
+  // latest values rather than the ones the session originally started with.
+  private fun persistConfig() {
+    store.saveConfig(notificationTitle, notificationText, notificationChannel, cadence)
+  }
+
+  // Populates the in-memory notification strings from the intent extras on a fresh start, otherwise
   // from the persisted store (sticky restart), falling back to the built-in safety-net defaults.
   private fun resolveNotificationConfig(intent: Intent?) {
     if (intent?.hasExtra(EXTRA_NOTIFICATION_TITLE) == true) {
@@ -160,7 +210,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     }
   }
 
-  // Populate the in-memory cadence: from the intent extra on a fresh start, otherwise from the
+  // Populates the in-memory cadence from the intent extra on a fresh start, otherwise from the
   // persisted store (sticky restart). Sanitized again here for integrity.
   private fun resolveCadenceConfig(intent: Intent?) {
     val raw =
@@ -292,12 +342,12 @@ class StepsForegroundService : Service(), StepsEventSink {
     manager.notify(NOTIFICATION_ID, buildNotification(steps))
   }
 
-  private fun stopCounting(clear: Boolean) {
+  // Stops the sensor and leaves the foreground, but never clears the persisted session, since
+  // stop() is pauses a session (the running total survives for a same 'since' resume) and a
+  // fresh session is started by startFreshSession() overwriting the store.
+  private fun stopCounting() {
     listener?.stopService()
     listener = null
-    if (clear) {
-      store.clearSession()
-    }
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     /**
      * stopForeground() does not reliably remove a notification that was last (re)posted

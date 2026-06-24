@@ -76,6 +76,24 @@ class StepsSessionStore(context: Context) {
       .apply()
   }
 
+  // Updates the persisted notification + cadence for the active session, without touching the running
+  // total/baseline/start. Used on a resume that adopts new options, so a later sticky restart renders
+  // the latest notification strings and counts steps with the latest cadence cap.
+  fun saveConfig(
+    notificationTitle: String,
+    notificationText: String,
+    notificationChannel: String,
+    cadence: Double,
+  ) {
+    prefs
+      .edit()
+      .putString(KEY_NOTIFICATION_TITLE, notificationTitle)
+      .putString(KEY_NOTIFICATION_TEXT, notificationText)
+      .putString(KEY_NOTIFICATION_CHANNEL, notificationChannel)
+      .putDouble(KEY_CADENCE, cadence)
+      .apply()
+  }
+
   // Persists the latest raw cumulative-counter checkpoint (updated on every emit).
   fun saveRawCheckpoint(rawCheckpoint: Double) {
     prefs.edit().putDouble(KEY_RAW_CHECKPOINT, rawCheckpoint).apply()
@@ -84,11 +102,6 @@ class StepsSessionStore(context: Context) {
   // Persists the latest session total so it can be replayed after a process restart.
   fun saveProgress(accumulatedSteps: Double) {
     prefs.edit().putDouble(KEY_ACCUMULATED_STEPS, accumulatedSteps).apply()
-  }
-
-  // Clears all session state (called on explicit stop).
-  fun clearSession() {
-    prefs.edit().clear().apply()
   }
 
   companion object {
