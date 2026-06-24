@@ -5,6 +5,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import org.pinge.steps.capabilities.HardwareCapabilities
+import org.pinge.steps.counters.Cadence
 import org.pinge.steps.services.StepsNotificationOptions
 import org.pinge.steps.services.StepsSessionCoordinator
 
@@ -30,8 +31,8 @@ class ReactNativeStepsModule(reactContext: ReactApplicationContext) : NativeReac
   }
 
   @ReactMethod
-  override fun start(from: Double, notification: ReadableMap) {
-    coordinator.start(from.toLong(), StepsNotificationOptions.from(notification))
+  override fun start(from: Double, notification: ReadableMap, cadence: Double) {
+    coordinator.start(from.toLong(), StepsNotificationOptions.from(notification), Cadence.sanitize(cadence))
   }
 
   @ReactMethod

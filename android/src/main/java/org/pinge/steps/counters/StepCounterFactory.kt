@@ -13,11 +13,16 @@ import org.pinge.steps.counters.pedometer.PedometerStepCounter
  */
 object StepCounterFactory {
 
-  fun create(context: Context, sensorManager: SensorManager, sink: StepsEventSink): SensorStepCounter =
+  fun create(
+    context: Context,
+    sensorManager: SensorManager,
+    sink: StepsEventSink,
+    cadence: Double,
+  ): SensorStepCounter =
     if (canUsePedometer(context)) {
-      PedometerStepCounter(sink, sensorManager)
+      PedometerStepCounter(sink, sensorManager, cadence)
     } else {
-      AccelerometerStepCounter(sink, sensorManager)
+      AccelerometerStepCounter(sink, sensorManager, cadence)
     }
 
   // The ACTIVITY_RECOGNITION permission is required for the pedometer events on API level 29+.

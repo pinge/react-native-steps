@@ -2,6 +2,7 @@ package org.pinge.steps.counters.accelerometer
 
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import org.pinge.steps.counters.Cadence
 import org.pinge.steps.counters.SensorStepCounter
 import org.pinge.steps.counters.SensorTypes
 import org.pinge.steps.counters.StepsEventSink
@@ -37,8 +38,17 @@ import kotlin.math.sqrt
  */
 class AccelerometerStepCounter(
   sink: StepsEventSink,
-  sensorManager: SensorManager
+  sensorManager: SensorManager,
+  cadence: Double,
 ) : SensorStepCounter(sink, sensorManager) {
+  // Absolute minimum interval between two counted steps, derived from the configured cadence cap.
+  // The cap is intrinsic to this detector: the paper's relative temporal threshold adapts to (and
+  // accepts) fast shaking, so this absolute floor is what actually rejects shake bursts. When the
+  // caller leaves cadence disabled we still apply the built-in Cadence.MAX (2.5 steps/s = 400 ms)
+  // safety floor; a configured cap (<= MAX) only ever tightens it.
+  private val minStepInterval: Long =
+    Cadence.minStepInterval(if (Cadence.isEnabled(cadence)) cadence else Cadence.MAX)
+
   // The normalized sensor type exposed to JavaScript, always SensorTypes.ACCELEROMETER.
   override val sensorTypeString = SensorTypes.ACCELEROMETER
   // The sensor type Android constant, always Sensor.TYPE_ACCELEROMETER.
@@ -80,9 +90,9 @@ class AccelerometerStepCounter(
   private var prevPrevMag = 0f
   private var sampleIndex = 0L
 
-  // Wall-clock time of the last counted step, for the absolute max-cadence cap (see classifyMiddleSample).
+  // Wall clock time of the last counted step, for the absolute max-cadence cap (see classifyMiddleSample()).
   // Kept in nanoseconds because it encodes a physical limit on human step rate, independent of sample rate.
-  private var lastStepTimeNs = 0L
+  private var lastStepAt = 0L
 
   override fun resetSessionState() {
     currentSteps = 0.0
@@ -98,7 +108,7 @@ class AccelerometerStepCounter(
     prevMag = 0f
     prevPrevMag = 0f
     sampleIndex = 0L
-    lastStepTimeNs = 0L
+    lastStepAt = 0L
     magStats.clear()
     peakIntervalStats.clear()
     valleyIntervalStats.clear()
@@ -117,7 +127,10 @@ class AccelerometerStepCounter(
    * has warmed up and a one-sample look-ahead is available, the previous sample (the middle of the
    * "a[n-1], a[n], a[n+1]" triple) is classified and run through the step state machine.
    */
-  override fun hasDetectedStep(eventData: FloatArray): Boolean {
+  override fun hasDetectedStep(eventData: FloatArray, eventAt: Long): Boolean {
+    // This detector times its absolute cadence cap with System.nanoTime() (see classifyMiddleSample());
+    // eventAt is unused here. The accelerometer is sampled at a fixed rate without the batching
+    // the pedometer can exhibit, so processing-time and event-time are equivalent for the cap.
     val mag = norm(eventData)
     magStats.push(mag)
     sampleIndex++
@@ -144,7 +157,7 @@ class AccelerometerStepCounter(
     middle: Float,
     right: Float,
     n: Long,
-    timeNs: Long,
+    time: Long,
   ): Boolean {
     val sigmaA = magStats.stddev
     // Stationary guard (beyond the paper, which only evaluated while stepping): at rest σ_a collapses to
@@ -175,16 +188,17 @@ class AccelerometerStepCounter(
       when {
         // New valley after a peak, far enough from the last valley: this completes a step. The state
         // machine always advances (so detection continues), but the step is only counted when at least
-        // MIN_STEP_INTERVAL_NS has elapsed since the last counted step. That absolute cap on cadence is
+        // minStepInterval has elapsed since the last counted step. That absolute cap on cadence is
         // what the paper's relative threshold lacks: without it, a fast shake registers many valid
         // peak/valley pairs per second, and the relative threshold simply adapts to that rate. Walking
-        // never exceeds ~2.5 steps/s, so this rejects shake bursts without dropping real steps.
+        // never exceeds the configured cap (<= 2.5 steps/s), so this rejects shake bursts without
+        // dropping real steps.
         state == State.PEAK && intervalSince(valleyIndex, n) > valleyThreshold() -> {
           registerValley(middle, n, recordInterval = true)
           updateStepAverage()
-          if (timeNs - lastStepTimeNs >= MIN_STEP_INTERVAL_NS) {
+          if (time - lastStepAt >= minStepInterval) {
             currentSteps += 1
-            lastStepTimeNs = timeNs
+            lastStepAt = time
             return true
           }
         }
@@ -301,17 +315,9 @@ class AccelerometerStepCounter(
     /**
      * Minimum step deviation σ_a (m/s²) required to attempt detection. A stationary device sits well
      * below this (noise ~0.02-0.1); walking is comfortably above (~1–3). Guards against cold-start
-     * stationary false positives. See classifyMiddleSample.
+     * stationary false positives. See classifyMiddleSample().
      */
     private const val MIN_STEP_DEVIATION = 0.5f
-
-    /**
-     * Absolute minimum interval between two counted steps, capping cadence at ~2.5 steps/s (400 ms).
-     * Walking does not exceed this, so no real steps are dropped; it rejects fast-shake bursts that the
-     * paper's cadence-relative temporal threshold would otherwise adapt to and accept. This counter
-     * targets walking only, running (up to ~3.5 steps/s) is intentionally out of scope.
-     */
-    private const val MIN_STEP_INTERVAL_NS = 400_000_000L
 
     // Euclidean norm |a| = sqrt(x²+y²+z²) of an acceleration vector.
     private fun norm(vector: FloatArray): Float {

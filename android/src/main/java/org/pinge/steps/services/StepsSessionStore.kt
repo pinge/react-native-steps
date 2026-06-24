@@ -31,22 +31,27 @@ class StepsSessionStore(context: Context) {
 
   // Latest emitted session total steps since sessionStart.
   val accumulatedSteps: Double
-    get() = prefs.getDouble(KEY_ACCUMULATED, 0.0)
+    get() = prefs.getDouble(KEY_ACCUMULATED_STEPS, 0.0)
 
   // The sensor strategy backing the session (a SensorTypes value).
   val sensorType: String
     get() = prefs.getString(KEY_SENSOR_TYPE, "") ?: ""
 
+  // The maximum-cadence cap for the session (steps/second), or Cadence.DISABLED (0) for no cap.
+  // Persisted so a sticky restart resumes counting with the same cap the session started with.
+  val cadence: Double
+    get() = prefs.getDouble(KEY_CADENCE, DEFAULT_CADENCE)
+
   // We persist the notification options, so the notification UI can be
   // re-rendered after a process restart with no React context attached.
   val notificationTitle: String?
-    get() = prefs.getString(KEY_NOTIF_TITLE, null)
+    get() = prefs.getString(KEY_NOTIFICATION_TITLE, null)
 
   val notificationText: String?
-    get() = prefs.getString(KEY_NOTIF_TEXT, null)
+    get() = prefs.getString(KEY_NOTIFICATION_TEXT, null)
 
   val notificationChannel: String?
-    get() = prefs.getString(KEY_NOTIF_CHANNEL, null)
+    get() = prefs.getString(KEY_NOTIFICATION_CHANNEL, null)
 
   // Starts a fresh session, discarding any previous state.
   fun startSession(
@@ -55,6 +60,7 @@ class StepsSessionStore(context: Context) {
     notificationTitle: String,
     notificationText: String,
     notificationChannel: String,
+    cadence: Double,
   ) {
     prefs
       .edit()
@@ -62,10 +68,11 @@ class StepsSessionStore(context: Context) {
       .putLong(KEY_SESSION_START, start)
       .putString(KEY_SENSOR_TYPE, sensorType)
       .putDouble(KEY_RAW_CHECKPOINT, RAW_UNSET)
-      .putDouble(KEY_ACCUMULATED, 0.0)
-      .putString(KEY_NOTIF_TITLE, notificationTitle)
-      .putString(KEY_NOTIF_TEXT, notificationText)
-      .putString(KEY_NOTIF_CHANNEL, notificationChannel)
+      .putDouble(KEY_ACCUMULATED_STEPS, 0.0)
+      .putString(KEY_NOTIFICATION_TITLE, notificationTitle)
+      .putString(KEY_NOTIFICATION_TEXT, notificationText)
+      .putString(KEY_NOTIFICATION_CHANNEL, notificationChannel)
+      .putDouble(KEY_CADENCE, cadence)
       .apply()
   }
 
@@ -76,7 +83,7 @@ class StepsSessionStore(context: Context) {
 
   // Persists the latest session total so it can be replayed after a process restart.
   fun saveProgress(accumulatedSteps: Double) {
-    prefs.edit().putDouble(KEY_ACCUMULATED, accumulatedSteps).apply()
+    prefs.edit().putDouble(KEY_ACCUMULATED_STEPS, accumulatedSteps).apply()
   }
 
   // Clears all session state (called on explicit stop).
@@ -85,16 +92,19 @@ class StepsSessionStore(context: Context) {
   }
 
   companion object {
-    private const val PREFS_NAME = "steps_bg"
+    private const val PREFS_NAME = "org.pinge.steps.session"
     private const val KEY_ACTIVE = "active"
     private const val KEY_SESSION_START = "session_start"
     private const val KEY_RAW_CHECKPOINT = "raw_checkpoint"
-    private const val KEY_ACCUMULATED = "accumulated_steps"
+    private const val KEY_ACCUMULATED_STEPS = "accumulated_steps"
     private const val KEY_SENSOR_TYPE = "sensor_type"
-    private const val KEY_NOTIF_TITLE = "notif_title"
-    private const val KEY_NOTIF_TEXT = "notif_text"
-    private const val KEY_NOTIF_CHANNEL = "notif_channel"
+    private const val KEY_NOTIFICATION_TITLE = "notification_title"
+    private const val KEY_NOTIFICATION_TEXT = "notification_text"
+    private const val KEY_NOTIFICATION_CHANNEL = "notification_channel"
+    private const val KEY_CADENCE = "cadence"
     const val RAW_UNSET = -1.0
+    // Default Cadence.DISABLED when a stored session predates the cadence key.
+    private const val DEFAULT_CADENCE = 0.0
   }
 }
 

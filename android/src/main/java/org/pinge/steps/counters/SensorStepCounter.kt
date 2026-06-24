@@ -51,7 +51,7 @@ abstract class SensorStepCounter(
   abstract val detectedSensor: Sensor?
 
   // The 'step' event payload for the current session state.
-  val stepsParamsMap: WritableMap
+  val stepPayload: WritableMap
     get() = StepEvent.build(currentSteps, startDate, endDate, sensorTypeString)
 
   // The total number of steps counted since the service started.
@@ -182,7 +182,7 @@ abstract class SensorStepCounter(
       // only on this thread. Then we hand over the immutable map to the main thread for emitting. The
       // 'registered' guard drops a step that lands after stopService() so the pipeline is not touched
       // after teardown.
-      val payload = stepsParamsMap
+      val payload = stepPayload
       mainThreadHandler.post { if (registered) sink.emitStep(payload) }
     }
   }
@@ -192,7 +192,7 @@ abstract class SensorStepCounter(
    * in PedometerStepCounter and AccelerometerStepCounter with different motion sensor handling
    * algorithms. Both implementations update their internal step count as a side effect.
    */
-  abstract fun hasDetectedStep(eventData: FloatArray, eventTime: Long): Boolean
+  abstract fun hasDetectedStep(eventData: FloatArray, eventAt: Long): Boolean
 
   /**
    * Called when the accuracy of the registered sensor has changed. Unlike onSensorChanged(),

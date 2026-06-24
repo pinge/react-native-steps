@@ -17,6 +17,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.WritableMap
 import org.pinge.steps.capabilities.AndroidCapabilities
+import org.pinge.steps.counters.Cadence
 import org.pinge.steps.counters.SensorStepCounter
 import org.pinge.steps.counters.StepCounterFactory
 import org.pinge.steps.counters.StepEvent
@@ -50,11 +51,15 @@ class StepsForegroundService : Service(), StepsEventSink {
 
   // Resolved notification strings (defaults filled in by the JS layer). Kept in memory for the
   // current process and persisted via the store so a no-JS sticky restart can re-render them.
-  private var notifTitle: String = DEFAULT_TITLE
-  private var notifText: String = DEFAULT_TEXT
-  private var notifChannel: String = DEFAULT_CHANNEL
+  private var notificationTitle: String = DEFAULT_TITLE
+  private var notificationText: String = DEFAULT_TEXT
+  private var notificationChannel: String = DEFAULT_CHANNEL
 
-  // Wall-clock time of the last posted notification update, used to throttle per-step re-posts to
+  // Resolved max cadence (steps per second), or Cadence.DISABLED for no cap. Resolved from the start
+  // intent on a fresh start, or from the store on a sticky restart, like the notification strings.
+  private var cadence: Double = Cadence.DISABLED
+
+  // Wall clock time of the last posted notification update, used to throttle per-step re-posts to
   // at most one per NOTIFICATION_THROTTLE_MS (see updateNotification). The initial startForeground
   // post does not go through the throttle, so the notification is always shown promptly on start.
   private var lastNotificationUpdateMs: Long = 0L
@@ -83,9 +88,10 @@ class StepsForegroundService : Service(), StepsEventSink {
   override fun onBind(intent: Intent?): IBinder = binder
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    // Resolve the notification strings before going foreground.
+    // Resolve the notification strings and max cadence before going foreground.
     // From the intent on a fresh start, or from the store on a sticky restart.
     resolveNotificationConfig(intent)
+    resolveCadenceConfig(intent)
 
     // On API level 26+ a foreground service must call startForeground promptly after being started.
     startForeground()
@@ -125,14 +131,17 @@ class StepsForegroundService : Service(), StepsEventSink {
     }
     val manager = sensorManager ?: return
 
-    val service = StepCounterFactory.create(this, manager, this)
+    // 'cadence' is already resolved (intent on fresh start, store on sticky restart) by
+    // resolveCadenceConfig() in onStartCommand(), so both paths construct the counter with
+    // the same cadence.
+    val service = StepCounterFactory.create(this, manager, this, cadence)
     listener = service
 
     if (store.isActive) {
       service.restoreService(store.sessionStart, store.rawCheckpoint, store.accumulatedSteps)
     } else {
       val start = freshStart ?: System.currentTimeMillis()
-      store.startSession(start, service.sensorTypeString, notifTitle, notifText, notifChannel)
+      store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, cadence)
       service.startService(start)
     }
   }
@@ -140,15 +149,27 @@ class StepsForegroundService : Service(), StepsEventSink {
   // Populate the in-memory notification strings: from the intent extras on a fresh start, otherwise
   // from the persisted store (sticky restart), falling back to the built-in safety-net defaults.
   private fun resolveNotificationConfig(intent: Intent?) {
-    if (intent?.hasExtra(EXTRA_NOTIF_TITLE) == true) {
-      notifTitle = intent.getStringExtra(EXTRA_NOTIF_TITLE) ?: DEFAULT_TITLE
-      notifText = intent.getStringExtra(EXTRA_NOTIF_TEXT) ?: DEFAULT_TEXT
-      notifChannel = intent.getStringExtra(EXTRA_NOTIF_CHANNEL) ?: DEFAULT_CHANNEL
+    if (intent?.hasExtra(EXTRA_NOTIFICATION_TITLE) == true) {
+      notificationTitle = intent.getStringExtra(EXTRA_NOTIFICATION_TITLE) ?: DEFAULT_TITLE
+      notificationText = intent.getStringExtra(EXTRA_NOTIFICATION_TEXT) ?: DEFAULT_TEXT
+      notificationChannel = intent.getStringExtra(EXTRA_NOTIFICATION_CHANNEL) ?: DEFAULT_CHANNEL
     } else {
-      notifTitle = store.notificationTitle ?: DEFAULT_TITLE
-      notifText = store.notificationText ?: DEFAULT_TEXT
-      notifChannel = store.notificationChannel ?: DEFAULT_CHANNEL
+      notificationTitle = store.notificationTitle ?: DEFAULT_TITLE
+      notificationText = store.notificationText ?: DEFAULT_TEXT
+      notificationChannel = store.notificationChannel ?: DEFAULT_CHANNEL
     }
+  }
+
+  // Populate the in-memory cadence: from the intent extra on a fresh start, otherwise from the
+  // persisted store (sticky restart). Sanitized again here for integrity.
+  private fun resolveCadenceConfig(intent: Intent?) {
+    val raw =
+      if (intent?.hasExtra(EXTRA_CADENCE) == true) {
+        intent.getDoubleExtra(EXTRA_CADENCE, Cadence.DISABLED)
+      } else {
+        store.cadence
+      }
+    cadence = Cadence.sanitize(raw)
   }
 
   override fun emitStep(data: WritableMap) {
@@ -174,7 +195,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     val callback = liveCallback ?: return
     val active = listener
     when {
-      active != null -> callback.emitStep(active.stepsParamsMap)
+      active != null -> callback.emitStep(active.stepPayload)
       store.isActive ->
         callback.emitStep(
           StepEvent.build(
@@ -231,20 +252,20 @@ class StepsForegroundService : Service(), StepsEventSink {
     // createNotificationChannel() is idempotent and also updates the user visible name of an
     // existing channel, so re-running it with a newly localized name keeps the channel in sync.
     val channel =
-      NotificationChannel(CHANNEL_ID, notifChannel, NotificationManager.IMPORTANCE_LOW).apply {
+      NotificationChannel(CHANNEL_ID, notificationChannel, NotificationManager.IMPORTANCE_LOW).apply {
         setShowBadge(false)
       }
     manager.createNotificationChannel(channel)
   }
 
   // Render the body, substituting the {{steps}} placeholder with the live count (static if absent).
-  private fun renderBody(steps: Double): String = notifText.replace("{{steps}}", steps.toLong().toString())
+  private fun renderBody(steps: Double): String = notificationText.replace("{{steps}}", steps.toLong().toString())
 
   private fun buildNotification(steps: Double): Notification {
     val builder =
       NotificationCompat
         .Builder(this, CHANNEL_ID)
-        .setContentTitle(notifTitle)
+        .setContentTitle(notificationTitle)
         .setContentText(renderBody(steps))
         .setSmallIcon(android.R.drawable.ic_menu_compass)
         .setOngoing(true)
@@ -312,10 +333,11 @@ class StepsForegroundService : Service(), StepsEventSink {
     private const val NOTIFICATION_THROTTLE_MS = 1_000L
     private const val ACTION_START = "org.pinge.steps.action.START"
     private const val ACTION_STOP = "org.pinge.steps.action.STOP"
-    private const val EXTRA_SESSION_START = "session_start_millis"
-    private const val EXTRA_NOTIF_TITLE = "notification_title"
-    private const val EXTRA_NOTIF_TEXT = "notification_text"
-    private const val EXTRA_NOTIF_CHANNEL = "notification_channel"
+    private const val EXTRA_SESSION_START = "session_start"
+    private const val EXTRA_NOTIFICATION_TITLE = "notification_title"
+    private const val EXTRA_NOTIFICATION_TEXT = "notification_text"
+    private const val EXTRA_NOTIFICATION_CHANNEL = "notification_channel"
+    private const val EXTRA_CADENCE = "cadence"
 
     private const val DEFAULT_TITLE = StepsNotificationOptions.DEFAULT_TITLE
     private const val DEFAULT_TEXT = StepsNotificationOptions.DEFAULT_TEXT
@@ -331,14 +353,16 @@ class StepsForegroundService : Service(), StepsEventSink {
       notificationTitle: String,
       notificationText: String,
       notificationChannel: String,
+      cadence: Double,
     ) {
       val intent =
         Intent(context, StepsForegroundService::class.java).apply {
           action = ACTION_START
           putExtra(EXTRA_SESSION_START, start)
-          putExtra(EXTRA_NOTIF_TITLE, notificationTitle)
-          putExtra(EXTRA_NOTIF_TEXT, notificationText)
-          putExtra(EXTRA_NOTIF_CHANNEL, notificationChannel)
+          putExtra(EXTRA_NOTIFICATION_TITLE, notificationTitle)
+          putExtra(EXTRA_NOTIFICATION_TEXT, notificationText)
+          putExtra(EXTRA_NOTIFICATION_CHANNEL, notificationChannel)
+          putExtra(EXTRA_CADENCE, cadence)
         }
       ContextCompat.startForegroundService(context.applicationContext, intent)
     }

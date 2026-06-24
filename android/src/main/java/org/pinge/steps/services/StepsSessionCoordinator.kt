@@ -87,11 +87,11 @@ class StepsSessionCoordinator(
    * Starts a step counting session covering start. Prefers a foreground service, but falls back to
    * in-process counting when a 'health' foreground service can't be started (see canRunBackgroundService).
    */
-  fun start(start: Long, notification: StepsNotificationOptions) {
+  fun start(start: Long, notification: StepsNotificationOptions, cadence: Double) {
     if (canRunBackgroundService()) {
-      startBackgroundSession(start, notification)
+      startBackgroundSession(start, notification, cadence)
     } else {
-      startInProcessSession(start)
+      startInProcessSession(start, cadence)
     }
   }
 
@@ -117,7 +117,7 @@ class StepsSessionCoordinator(
     !AndroidCapabilities.requiresHealthForegroundServiceGate() ||
       Permissions.isActivityRecognitionGranted(context)
 
-  private fun startBackgroundSession(start: Long, notification: StepsNotificationOptions) {
+  private fun startBackgroundSession(start: Long, notification: StepsNotificationOptions, cadence: Double) {
     synchronized(sessionLock) {
       stopInProcessSession()
       StepsForegroundService.startSession(
@@ -126,6 +126,7 @@ class StepsSessionCoordinator(
         notification.title,
         notification.text,
         notification.channel,
+        cadence,
       )
       if (!bindRequested) {
         val intent = Intent(bindContext, StepsForegroundService::class.java)
@@ -164,10 +165,10 @@ class StepsSessionCoordinator(
   }
 
   // in-process fallback
-  private fun startInProcessSession(start: Long) {
+  private fun startInProcessSession(start: Long, cadence: Double) {
     synchronized(sessionLock) {
       stopInProcessSession()
-      val service = StepCounterFactory.create(context, sensorManager, sink)
+      val service = StepCounterFactory.create(context, sensorManager, sink, cadence)
       inProcessListener = service
       service.startService(start)
     }
