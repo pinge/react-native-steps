@@ -56,7 +56,6 @@ object HardwareCapabilities {
       putString("os", "android")
       putString("type", type)
       putString("name", sensor.name)
-      putInt("id", sensor.type)
       putString("vendor", sensor.vendor)
       putDouble("power", sensor.power.toDouble())
       putDouble("resolution", sensor.resolution.toDouble())
