@@ -29,7 +29,7 @@ object HardwareCapabilities {
   fun canCountSteps(context: Context): Boolean = hasPedometer(context) || hasAccelerometer(context)
 
   /**
-   * The device's available step-counting sensors as the 'getSensors' wire payload.
+   * The device's available step counting hardware sensors, used in getSensors() payload.
    * Returns the most relevant sensor first (pedometer if exists, then accelerometer).
    */
   fun availableSensors(context: Context): WritableArray =
