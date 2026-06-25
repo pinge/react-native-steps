@@ -126,6 +126,7 @@ class StepsSessionCoordinator(
         notification.title,
         notification.text,
         notification.channel,
+        notification.url,
         cadence,
       )
       if (!bindRequested) {

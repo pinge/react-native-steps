@@ -132,6 +132,8 @@ export type AndroidNotificationOptions = {
   text?: string;
   /** User visible notification channel name. */
   channel?: string;
+  /** Deep link URL opened when the user taps the foreground notification. By default it just opens the app. */
+  url?: string;
 };
 
 export interface Spec extends TurboModule {

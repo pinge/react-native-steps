@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.hardware.SensorManager
+import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
@@ -54,6 +55,10 @@ class StepsForegroundService : Service(), StepsEventSink {
   private var notificationTitle: String = DEFAULT_TITLE
   private var notificationText: String = DEFAULT_TEXT
   private var notificationChannel: String = DEFAULT_CHANNEL
+
+  // Optional deep link URL. When set and and the notification is tapped, it will follow the URL.
+  // Otherwise it will just open the app as the default behavior.
+  private var notificationUrl: String? = null
 
   // Resolved max cadence (steps per second), or Cadence.DISABLED for no cap. Resolved from the start
   // intent on a fresh start, or from the store on a sticky restart, like the notification strings.
@@ -166,7 +171,7 @@ class StepsForegroundService : Service(), StepsEventSink {
   private fun startFreshSession(start: Long) {
     stopListener()
     val service = createCounter() ?: return
-    store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, cadence)
+    store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, notificationUrl, cadence)
     service.startService(start)
   }
 
@@ -193,7 +198,7 @@ class StepsForegroundService : Service(), StepsEventSink {
   // Persists the (possibly updated) notification + cadence so a later sticky restart uses the
   // latest values rather than the ones the session originally started with.
   private fun persistConfig() {
-    store.saveConfig(notificationTitle, notificationText, notificationChannel, cadence)
+    store.saveConfig(notificationTitle, notificationText, notificationChannel, notificationUrl, cadence)
   }
 
   // Populates the in-memory notification strings from the intent extras on a fresh start, otherwise
@@ -203,10 +208,12 @@ class StepsForegroundService : Service(), StepsEventSink {
       notificationTitle = intent.getStringExtra(EXTRA_NOTIFICATION_TITLE) ?: DEFAULT_TITLE
       notificationText = intent.getStringExtra(EXTRA_NOTIFICATION_TEXT) ?: DEFAULT_TEXT
       notificationChannel = intent.getStringExtra(EXTRA_NOTIFICATION_CHANNEL) ?: DEFAULT_CHANNEL
+      notificationUrl = intent.getStringExtra(EXTRA_NOTIFICATION_URL)?.takeIf { it.isNotBlank() }
     } else {
       notificationTitle = store.notificationTitle ?: DEFAULT_TITLE
       notificationText = store.notificationText ?: DEFAULT_TEXT
       notificationChannel = store.notificationChannel ?: DEFAULT_CHANNEL
+      notificationUrl = store.notificationUrl
     }
   }
 
@@ -323,6 +330,14 @@ class StepsForegroundService : Service(), StepsEventSink {
         .setPriority(NotificationCompat.PRIORITY_LOW)
 
     packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
+      // When a deep link URL is set, we turn the launcher intent into an explicit ACTION_VIEW
+      // that includes the URL in its data (the launch intent is already resolved, so it does not
+      // need a manifest intent filter. React Native Linking.getInitialURL() reads the URL on a
+      // cold start. When the URL is null, the launcher intent just opens the app.
+      notificationUrl?.let { url ->
+        launch.action = Intent.ACTION_VIEW
+        launch.data = Uri.parse(url)
+      }
       builder.setContentIntent(
         PendingIntent.getActivity(this, 0, launch, PENDING_INTENT_FLAGS),
       )
@@ -387,6 +402,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     private const val EXTRA_NOTIFICATION_TITLE = "notification_title"
     private const val EXTRA_NOTIFICATION_TEXT = "notification_text"
     private const val EXTRA_NOTIFICATION_CHANNEL = "notification_channel"
+    private const val EXTRA_NOTIFICATION_URL = "notification_url"
     private const val EXTRA_CADENCE = "cadence"
 
     private const val DEFAULT_TITLE = StepsNotificationOptions.DEFAULT_TITLE
@@ -403,6 +419,7 @@ class StepsForegroundService : Service(), StepsEventSink {
       notificationTitle: String,
       notificationText: String,
       notificationChannel: String,
+      notificationUrl: String?,
       cadence: Double,
     ) {
       val intent =
@@ -412,6 +429,7 @@ class StepsForegroundService : Service(), StepsEventSink {
           putExtra(EXTRA_NOTIFICATION_TITLE, notificationTitle)
           putExtra(EXTRA_NOTIFICATION_TEXT, notificationText)
           putExtra(EXTRA_NOTIFICATION_CHANNEL, notificationChannel)
+          notificationUrl?.let { putExtra(EXTRA_NOTIFICATION_URL, it) }
           putExtra(EXTRA_CADENCE, cadence)
         }
       ContextCompat.startForegroundService(context.applicationContext, intent)

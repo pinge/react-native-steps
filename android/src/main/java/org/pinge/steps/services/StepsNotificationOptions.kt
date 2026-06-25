@@ -12,6 +12,7 @@ data class StepsNotificationOptions(
   val title: String,
   val text: String,
   val channel: String,
+  val url: String?,
 ) {
   companion object {
     // Notification options defaults for the whole module. StepsForegroundService reuses
@@ -25,9 +26,13 @@ data class StepsNotificationOptions(
         title = map.getStringOr("title", DEFAULT_TITLE),
         text = map.getStringOr("text", DEFAULT_TEXT),
         channel = map.getStringOr("channel", DEFAULT_CHANNEL),
+        url = map.getStringOrNull("url")?.takeIf { it.isNotBlank() },
       )
 
     private fun ReadableMap.getStringOr(key: String, fallback: String): String =
       if (hasKey(key) && !isNull(key)) getString(key) ?: fallback else fallback
+
+    private fun ReadableMap.getStringOrNull(key: String): String? =
+      if (hasKey(key) && !isNull(key)) getString(key) else null
   }
 }

@@ -97,8 +97,9 @@ interface StartCountingOptions {
   onError?: (error: StepErrorEvent) => void;
   /**
    * Customization options for the Android foreground service notification.
-   * Any omitted field has a built-in English fallback supplied on the native side.
-   * Android only, ignored on iOS.
+   * Any omitted text field (except the deep link `url`) has a built-in English fallback supplied
+   * on the native side. If the deep link `url` is omitted, the app will just open without an
+   * initial URL when tapping the notification. Android only, ignored on iOS.
    */
   notification?: AndroidNotificationOptions;
   /**

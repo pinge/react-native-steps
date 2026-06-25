@@ -53,6 +53,10 @@ class StepsSessionStore(context: Context) {
   val notificationChannel: String?
     get() = prefs.getString(KEY_NOTIFICATION_CHANNEL, null)
 
+  // The deep link URL opened when the user taps the foreground notification, or null to just open the app.
+  val notificationUrl: String?
+    get() = prefs.getString(KEY_NOTIFICATION_URL, null)
+
   // Starts a fresh session, discarding any previous state.
   fun startSession(
     start: Long,
@@ -60,6 +64,7 @@ class StepsSessionStore(context: Context) {
     notificationTitle: String,
     notificationText: String,
     notificationChannel: String,
+    notificationUrl: String?,
     cadence: Double,
   ) {
     prefs
@@ -72,6 +77,7 @@ class StepsSessionStore(context: Context) {
       .putString(KEY_NOTIFICATION_TITLE, notificationTitle)
       .putString(KEY_NOTIFICATION_TEXT, notificationText)
       .putString(KEY_NOTIFICATION_CHANNEL, notificationChannel)
+      .putString(KEY_NOTIFICATION_URL, notificationUrl)
       .putDouble(KEY_CADENCE, cadence)
       .apply()
   }
@@ -83,6 +89,7 @@ class StepsSessionStore(context: Context) {
     notificationTitle: String,
     notificationText: String,
     notificationChannel: String,
+    notificationUrl: String?,
     cadence: Double,
   ) {
     prefs
@@ -90,6 +97,7 @@ class StepsSessionStore(context: Context) {
       .putString(KEY_NOTIFICATION_TITLE, notificationTitle)
       .putString(KEY_NOTIFICATION_TEXT, notificationText)
       .putString(KEY_NOTIFICATION_CHANNEL, notificationChannel)
+      .putString(KEY_NOTIFICATION_URL, notificationUrl)
       .putDouble(KEY_CADENCE, cadence)
       .apply()
   }
@@ -114,6 +122,7 @@ class StepsSessionStore(context: Context) {
     private const val KEY_NOTIFICATION_TITLE = "notification_title"
     private const val KEY_NOTIFICATION_TEXT = "notification_text"
     private const val KEY_NOTIFICATION_CHANNEL = "notification_channel"
+    private const val KEY_NOTIFICATION_URL = "notification_url"
     private const val KEY_CADENCE = "cadence"
     const val RAW_UNSET = -1.0
     // Default Cadence.DISABLED when a stored session predates the cadence key.
