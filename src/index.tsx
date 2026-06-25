@@ -85,7 +85,13 @@ interface StartCountingOptions {
    * older than seven days ago returns only the available data.
    */
   since?: Date;
-  /** Callback for each {@link StepEvent} */
+  /**
+   * Callback for each {@link StepEvent}.
+   *
+   * On iOS, CMPedometer does not emit individual steps. The motion coprocessor batches steps for
+   * power efficiency and emits a step count every 1-3 seconds, so `steps` typically advances by
+   * several at a time. On Android, the sensors emit more granular step increments.
+   */
   onStep: (event: StepEvent) => void;
   /** Optional callback when an error occurs (e.g. CMPedometer failure on iOS, no usable sensor on Android) */
   onError?: (error: StepErrorEvent) => void;
