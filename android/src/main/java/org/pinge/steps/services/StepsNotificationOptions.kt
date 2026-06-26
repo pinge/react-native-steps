@@ -19,7 +19,7 @@ data class StepsNotificationOptions(
     // Foreground service notification defaults for the whole module. StepsForegroundService reuses
     // these same constants for its sticky restart mechanism.
     const val DEFAULT_TITLE = "Counting steps"
-    const val DEFAULT_TEXT = "{{steps}} steps"
+    const val DEFAULT_TEXT = "👟 {{steps}} steps"
     const val DEFAULT_CHANNEL = "Step Counter"
 
     // Default small icon drawable resource name, shared by the foreground and goal notifications.
