@@ -37,6 +37,10 @@ class StepsSessionCoordinator(
   private val sensorManager: SensorManager =
     context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
+  // Used only to wipe persisted state on a stop(true). Shares the same SharedPreferences as the
+  // foreground service's own store.
+  private val store: StepsSessionStore = StepsSessionStore(context)
+
   /**
    * Guards all mutable session state (serviceBinder, bindRequested, inProcessListener). The binding
    * is touched from the ServiceConnection callbacks (main thread) and from the start/stop/dispose
@@ -87,19 +91,32 @@ class StepsSessionCoordinator(
    * Starts a step counting session covering start. Prefers a foreground service, but falls back to
    * in-process counting when a 'health' foreground service can't be started (see canRunBackgroundService).
    */
-  fun start(start: Long, notification: StepsNotificationOptions, cadence: Double) {
+  fun start(start: Long, notification: StepsNotificationOptions, cadence: Double, goal: StepsGoalOptions?) {
     if (canRunBackgroundService()) {
-      startBackgroundSession(start, notification, cadence)
+      startBackgroundSession(start, notification, cadence, goal)
     } else {
+      // The in-process fallback (no ACTIVITY_RECOGNITION) does not evaluate goals, it is in-memory
+      // only and counts steps only while the app process is alive. Goal notifications are
+      // background service only (for now?).
+      // TODO explore goal notifications with in-process fallback
       startInProcessSession(start, cadence)
     }
   }
 
-  // Stops step counting, ends in-process fallback (if any), unbinds, and stops the foreground service.
-  fun stop() {
+  /*
+   * Stops step counting, ends in-process fallback (if any), unbinds, and stops the foreground
+   * service. If 'clear' is true, the persisted state is wiped in addition to stopping. In background
+   * service mode the service clears the persisted state after stopping its sensor. In in-process
+   * fallback mode there is no foreground service to process clearing the persisted state, so we
+   * wipe it here (the in-process counter does not touch the store, so no race conditions).
+   */
+  fun stop(clear: Boolean) {
     stopInProcessSession()
     unbindFromService()
-    StepsForegroundService.stopSession(context)
+    if (clear && !canRunBackgroundService()) {
+      store.clear()
+    }
+    StepsForegroundService.stopSession(context, clear)
   }
 
   // Releases the coordinator when the React context is torn down. Unbind but leave the foreground
@@ -117,7 +134,12 @@ class StepsSessionCoordinator(
     !AndroidCapabilities.requiresHealthForegroundServiceGate() ||
       Permissions.isActivityRecognitionGranted(context)
 
-  private fun startBackgroundSession(start: Long, notification: StepsNotificationOptions, cadence: Double) {
+  private fun startBackgroundSession(
+    start: Long,
+    notification: StepsNotificationOptions,
+    cadence: Double,
+    goal: StepsGoalOptions?,
+  ) {
     synchronized(sessionLock) {
       stopInProcessSession()
       StepsForegroundService.startSession(
@@ -126,8 +148,10 @@ class StepsSessionCoordinator(
         notification.title,
         notification.text,
         notification.channel,
+        notification.icon,
         notification.url,
         cadence,
+        goal,
       )
       if (!bindRequested) {
         val intent = Intent(bindContext, StepsForegroundService::class.java)

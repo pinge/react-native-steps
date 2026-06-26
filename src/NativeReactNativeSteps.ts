@@ -114,26 +114,50 @@ declare function _assertNativeSensorMapping(
 ): void;
 
 /**
- * Strings used to render the Android background foreground-service notification.
- * All fields are resolved (defaults applied) by the JS layer before reaching native.
+ * Strings used to render a notification. Shared by the Android foreground service notification
+ * (Android only) and the cross-platform goal achieved notification. The `{{steps}}` token in
+ * `text` is substituted with the corresponding step count by the native side on each render.
  * - title: notification title line.
- * - text: notification body. Any `{{steps}}` token is replaced with the live step count on every
- *   update; if the token is absent the body stays the same as the count changes (no substitution).
- * - channel: user-visible notification channel name (Android 8+; ignored on iOS and Android < 8).
+ * - text: notification body. Any `{{steps}}` token is replaced with the step count; if the token
+ *   is absent the body is static (no substitution).
+ * - channel: user visible notification channel name (Android 8+; ignored on iOS and Android < 8).
+ * - icon: small icon drawable resource name (Android only; ignored on iOS).
+ * - url: deep link opened when the notification is tapped (both platforms).
  */
-export type AndroidNotificationOptions = {
-  /** The foreground service notification title line.  */
+export type NotificationOptions = {
+  /** The notification title line. */
   title?: string;
   /**
-   * The foreground service notification body that should include `{{steps}}` template tag that is
-   * replaced with the step count. If the token is absent the notification body becomes as the step
-   * count changes (no template substitution).
+   * The notification body that should include the `{{steps}}` template tag, replaced with the step
+   * count. If the token is absent the body is static (no template substitution).
    */
   text?: string;
-  /** User visible notification channel name. */
+  /** User visible notification channel name. Android only, ignored on iOS. */
   channel?: string;
-  /** Deep link URL opened when the user taps the foreground notification. By default it just opens the app. */
+  /**
+   * Name of the small icon drawable resource (e.g. `"ic_menu_compass"`, the default) used for the
+   * notification. The host app must provide a drawable (or mipmap) with this name, and if it is
+   * not found a built-in Android fallback icon is used. Android only and ignored on iOS, where
+   * notifications always show the app's own icon and a custom small icon cannot be set.
+   */
+  icon?: string;
+  /** Deep link URL opened when the user taps the notification. By default it just opens the app. */
   url?: string;
+};
+
+/**
+ * Codegen-facing shape of the goal config passed to `start` (or `null` when no goal is set).
+ * We mirror the public `Goal` type but changed the `period` to `string` because React Native
+ * codegen cannot express the `GoalPeriod` literal union and `notification` is always present
+ * since it defaults to `{}` on the JavaScript side.
+ */
+export type NativeGoal = {
+  /** The recurrent time per window after which the goal 'steps' is reset on. The only option is 'daily'. */
+  period: string;
+  /** The total number of steps as a target that triggers the goal notification once per period. */
+  steps: number;
+  /** Title and body translations, deep link URL and icon to render with the goal achieved notification when the 'steps' target is reached. */
+  notification: NotificationOptions;
 };
 
 export interface Spec extends TurboModule {
@@ -141,10 +165,11 @@ export interface Spec extends TurboModule {
   canCountSteps(): Promise<boolean>;
   start(
     since: number,
-    notification: AndroidNotificationOptions,
-    cadence: number
+    notification: NotificationOptions,
+    cadence: number,
+    goal: NativeGoal | null
   ): void;
-  stop(): void;
+  stop(clear: boolean): void;
   getSensors(): Promise<NativeDeviceSensor[]>;
   /* NativeEventEmitter required methods */
   addListener(event: string): void;
