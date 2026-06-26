@@ -318,9 +318,10 @@ class StepsForegroundService : Service(), StepsEventSink {
     var changed = false
     val key = Goal.periodKey(System.currentTimeMillis(), goalPeriod)
     if (key != goalPeriodKey) {
-      // Rolling over from the unset sentinel (0) is the first window we track, not a real day change,
-      // so the baseline is 0 (count the whole current period). A real period-to-period rollover
-      // snapshots the running total so the next period starts from there.
+      // When goalPeriodKey is 0 it means we haven't tracked a window yet, so this is the first one,
+      // and not an actual day change: the baseline stays 0 and we count the whole period. On a real
+      // day change we instead save the current total as the baseline, so the next day starts counting
+      // from there.
       goalBaseline = if (goalPeriodKey == 0L) 0.0 else total
       goalPeriodKey = key
       goalNotified = false

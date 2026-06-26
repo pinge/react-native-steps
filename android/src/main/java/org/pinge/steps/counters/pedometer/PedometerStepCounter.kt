@@ -13,10 +13,10 @@ import kotlin.math.floor
  * This class is responsible for listening to the pedometer (step counter) sensor.
  *
  * Maximum plausible walking cadence (steps per second), or Cadence.DISABLED for no cap.
- * When enabled, a reading may credit at most "floor(elapsedSinceLastReading * cadence)" steps.
+ * When enabled, a reading may add at most "floor(elapsedSinceLastReading * cadence)" steps.
  * The excess is dropped as a burst false positive (over count). Because the cap is measured
  * against the time since the previous reading, a legitimately batched delivery (many steps
- * reported at once over a long window) is credited in full, while a fast spike over a short
+ * reported at once over a long window) is accepted in full, while a fast spike over a short
  * window is trimmed.
  */
 class PedometerStepCounter(
@@ -95,24 +95,24 @@ class PedometerStepCounter(
       return false
     }
 
-    // Cap the credited steps to the configured cadence. The allowance scales with the time since the
-    // previous reading, so steady walking (and batched delivery) is credited in full while a spike
+    // Cap the accepted steps to the configured cadence. The allowance scales with the time since the
+    // previous reading, so steady walking (and batched delivery) is accepted in full while a spike
     // over a short window is trimmed. Excess is dropped permanently (no carry forward) matching the
     // accelerometer's absolute cap and avoiding phantom steps after a burst stops.
-    val credited =
+    val accepted =
       if (Cadence.isEnabled(cadence) && lastEventAt >= 0L) {
         val elapsedSeconds = (eventAt - lastEventAt).coerceAtLeast(0L) / 1_000_000_000.0
         minOf(delta, floor(elapsedSeconds * cadence))
       } else {
         // If cadence is disabled or there is no prior event to measure against (e.g. first reading
-        // after a (re)start), then we credit the full delta, including steps the counter kept while
+        // after a (re)start), then we accept the full delta, including steps the counter kept while
         // the app process was not running.
         delta
       }
     lastEventAt = eventAt
 
-    return if (credited > 0.0) {
-      currentSteps += credited
+    return if (accepted > 0.0) {
+      currentSteps += accepted
       true
     } else {
       // This path means thee whole delta was an over-cadence burst, so we drop it.
