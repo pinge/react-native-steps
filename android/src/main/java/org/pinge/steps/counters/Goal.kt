@@ -10,8 +10,7 @@ import java.util.Calendar
  * These helpers are used during validation and per period window key for daily rollovers. When the
  * window key changes, the goal baseline and its once per period notification flag are reset.
  *
- * Supports a 'daily' period for now, but it should be easy to extend to 'weekly' and 'monthly' for
- * example.  Only 'daily' is supported for now; 'weekly' is reserved and falls back to daily until implemented.
+ * Only 'daily' is supported for now; 'weekly' is reserved and falls back to daily until implemented.
  */
 object Goal {
   // Represents a "no goal" set, so all events coming from the sensor step counters are passed

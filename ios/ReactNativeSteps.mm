@@ -60,12 +60,13 @@ RCT_EXPORT_METHOD(getSensors:(RCTPromiseResolveBlock)resolve
 
 RCT_EXPORT_METHOD(start:(double)since
                   notification:(NSDictionary *)notification
-                  cadence:(double)cadence) {
-  [_core startWithSince:since notification:notification cadence:cadence];
+                  cadence:(double)cadence
+                  goal:(NSDictionary *)goal) {
+  [_core startWithSince:since notification:notification cadence:cadence goal:goal];
 }
 
-RCT_EXPORT_METHOD(stop) {
-  [_core stop];
+RCT_EXPORT_METHOD(stop:(BOOL)clear) {
+  [_core stopWithClear:clear];
 }
 
 #pragma mark - RNStepsEventSink
