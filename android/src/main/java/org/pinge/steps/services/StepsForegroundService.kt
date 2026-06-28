@@ -338,6 +338,13 @@ class StepsForegroundService : Service(), StepsEventSink {
     }
   }
 
+  // The step count shown in the ongoing foreground notification. When a goal is set this is the
+  // steps within the current goal window (total - goalBaseline), so the notification resets along
+  // with the goal at local midnight. The rollover itself is owned by evaluateGoal(). If no goal is
+  // set this is the session cumulative total number of steps. This is used for display only.
+  private fun notificationSteps(total: Double): Double =
+    if (Goal.isEnabled(goalSteps)) total - goalBaseline else total
+
   override fun emitStep(data: WritableMap) {
     val total = listener?.currentSteps ?: store.accumulatedSteps
     store.saveProgress(total)
@@ -345,8 +352,10 @@ class StepsForegroundService : Service(), StepsEventSink {
     if (checkpoint >= 0.0) {
       store.saveRawCheckpoint(checkpoint)
     }
-    updateNotification(total)
+    // Evaluate the goal first so a midnight rollover updates goalBaseline before we render,
+    // then display the possibly goal windowed count.
     evaluateGoal(total)
+    updateNotification(notificationSteps(total))
     // Forward the event to JavaScript only when a React context is connected,
     // otherwise we just persist progress.
     liveCallback?.emitStep(data)
@@ -383,7 +392,7 @@ class StepsForegroundService : Service(), StepsEventSink {
       ServiceCompat.startForeground(
         this,
         NOTIFICATION_ID,
-        buildNotification(total),
+        buildNotification(notificationSteps(total)),
         AndroidCapabilities.foregroundServiceType(),
       )
     } catch (e: IllegalStateException) {
