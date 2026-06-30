@@ -127,8 +127,9 @@ export type NativeGoal = {
 };
 export interface Spec extends TurboModule {
     canCountSteps(): Promise<boolean>;
-    start(since: number, notification: NotificationOptions, cadence: number, goal: NativeGoal | null): void;
-    stop(clear: boolean): void;
+    start(since: number, notification: NotificationOptions, cadence: number, goal: NativeGoal | null): Promise<void>;
+    stop(clear: boolean): Promise<void>;
+    isCounting(): Promise<boolean>;
     getSensors(): Promise<NativeDeviceSensor[]>;
     addListener(event: string): void;
     removeListeners(count: number): void;

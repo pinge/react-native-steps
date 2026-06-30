@@ -102,6 +102,11 @@ abstract class SensorStepCounter(
   // from the module's @ReactMethod calls) while the guard is read on the main thread.
   @Volatile private var registered = false
 
+  // Whether the sensor listener is currently registered and delivering steps. This is false before
+  // startService()/restoreService(), when no sensor of this type exists (registerSensor() bails),
+  // and after stopService(). Used by the session coordinator in isCounting() for the in-process path.
+  fun isRegistered(): Boolean = registered
+
   fun startService(start: Long) {
     startDate = start.takeIf { it > 0 } ?: System.currentTimeMillis()
     resetSessionState()
@@ -124,7 +129,6 @@ abstract class SensorStepCounter(
     // null, we bail safely instead of crashing, and the session becomes a no-op.
     if (sensor == null) {
       Log.w(TAG_NAME, "No $sensorTypeString sensor available; not registering a listener")
-      sink.emitError("No $sensorTypeString sensor available")
       return
     }
     // Deliver sensor events on a dedicated background thread instead of the main thread.

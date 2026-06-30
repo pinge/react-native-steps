@@ -73,11 +73,25 @@ public final class StepsCore: NSObject {
   // so it is ignored here (the parameter only exists to satisfy the shared codegen spec). Pin
   // the ObjectiveC selector explicitly: Swift would otherwise export this as 'startSince:...' (it only
   // inserts "With" for initializers), but the shim calls 'startWithSince:notification:cadence:'.
+  // Returns nil once the session is live, or an error message when it could not start.
   @objc(startWithSince:notification:cadence:goal:)
-  public func start(since: Double, notification: [AnyHashable: Any]?, cadence: Double, goal goalDict: [AnyHashable: Any]?) {
+  public func start(since: Double, notification: [AnyHashable: Any]?, cadence: Double, goal goalDict: [AnyHashable: Any]?) -> String? {
     // 'notification' configures the Android foreground service only, iOS has none, so it's ignored.
     // 'goal' is used on iOS as it fires a once per period local notification.
     _ = notification
+
+    // The device has no step counting hardware, so a step counting session can never emit step events.
+    guard CMPedometer.isStepCountingAvailable() else {
+      return "step counting is not available on this device"
+    }
+    // Motion access was explicitly denied/restricted, so CMPedometer queries fail. .notDetermined is
+    // allowed through since starting triggers the system prompt on the first query.
+    switch CMPedometer.authorizationStatus() {
+    case .denied, .restricted:
+      return "motion & fitness access is denied"
+    default:
+      break
+    }
 
     // JavaScript validates cadence, re-sanitize defensively (an out-of-range value becomes disabled).
     let sanitizedCadence = Cadence.sanitize(cadence)
@@ -150,6 +164,10 @@ public final class StepsCore: NSObject {
     // Bucketed reconciliation (covers cold launch). Live updates begin automatically once this reconciliation
     // (plus any overlapping foreground reconciliation) drains, see reconcileChainDidFinish().
     reconcile(from: gapStart)
+
+    // The session is established (sessionStartDate is set), so report success. Reconciliation and
+    // live updates continue asynchronously, and any error flows through the error event, not here.
+    return nil
   }
 
   // By default stop() is a pause, not a terminate: it stops live updates and resets the in-memory
@@ -182,6 +200,22 @@ public final class StepsCore: NSObject {
     if clear {
       store.clear()
     }
+  }
+
+  // Whether step events are actively being produced right now. This is true only when the hardware
+  // can count, motion authorization is not blocked, and a step counting session is currently active
+  // in this process (sessionStartDate is set by start() and cleared by stop()).
+  @objc public func isCounting() -> Bool {
+    guard CMPedometer.isStepCountingAvailable() else { return false }
+    // Only an explicit denial/restriction blocks counting. .notDetermined paired with a live session
+    // is still counting (updates are running; the first query resolves the prompt).
+    switch CMPedometer.authorizationStatus() {
+    case .denied, .restricted:
+      return false
+    default:
+      break
+    }
+    return currentSessionStart() != nil
   }
 
   // MARK: - Foreground observer (warm-foreground reconciliation)

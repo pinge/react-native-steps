@@ -78,7 +78,7 @@ interface StartCountingOptions {
     goal?: Goal;
 }
 /** Start counting steps. */
-export declare function startCounting(options: StartCountingOptions): void;
+export declare function startCounting(options: StartCountingOptions): Promise<void>;
 /** Options for {@link stopCounting}. */
 interface StopCountingOptions {
     /**
@@ -90,7 +90,7 @@ interface StopCountingOptions {
     clear?: boolean;
 }
 /** Stop counting steps. */
-export declare function stopCounting(options?: StopCountingOptions): void;
+export declare function stopCounting(options?: StopCountingOptions): Promise<void>;
 /**
  * Whether a step counting session is currently active.
  *
@@ -99,6 +99,6 @@ export declare function stopCounting(options?: StopCountingOptions): void;
  * function returns `false` even if a native session is still alive. Use it to mirror the current
  * session in the UI, not as the source of truth for a backgrounded native session.
  */
-export declare function isCounting(): boolean;
+export declare function isCounting(): Promise<boolean>;
 export { NAME, VERSION, type SensorType, type NotificationOptions, type StepEvent, type StepErrorEvent, type DeviceSensor, type IOSSensor, type AndroidSensor, type StartCountingOptions, type StopCountingOptions, };
 //# sourceMappingURL=index.d.ts.map

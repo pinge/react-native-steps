@@ -32,18 +32,25 @@ class ReactNativeStepsModule(reactContext: ReactApplicationContext) : NativeReac
   }
 
   @ReactMethod
-  override fun start(since: Double, notification: ReadableMap, cadence: Double, goal: ReadableMap?) {
+  override fun start(since: Double, notification: ReadableMap, cadence: Double, goal: ReadableMap?, promise: Promise) {
     coordinator.start(
       since.toLong(),
       StepsNotificationOptions.from(notification),
       Cadence.sanitize(cadence),
       StepsGoalOptions.from(goal),
-    )
+    ) { error ->
+      if (error == null) promise.resolve(null) else promise.reject("E_START_FAILED", error)
+    }
   }
 
   @ReactMethod
-  override fun stop(clear: Boolean) {
-    coordinator.stop(clear)
+  override fun stop(clear: Boolean, promise: Promise) {
+    coordinator.stop(clear) { promise.resolve(null) }
+  }
+
+  @ReactMethod
+  override fun isCounting(promise: Promise) {
+    promise.resolve(coordinator.isCounting())
   }
 
   @ReactMethod

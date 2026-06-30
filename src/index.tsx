@@ -95,12 +95,12 @@ let _eventSubscription: EventSubscription | null = null;
 let _errorSubscription: EventSubscription | null = null;
 
 /** Whether the device supports step counting with hardware sensors */
-export function canCountSteps(): Promise<boolean> {
+export async function canCountSteps(): Promise<boolean> {
   return ReactNativeSteps.canCountSteps();
 }
 
 /** Lists the available step counting hardware sensors for this device */
-export function getSensors(): Promise<DeviceSensor[]> {
+export async function getSensors(): Promise<DeviceSensor[]> {
   // Codegen can only describe a loose shape (every platform field as optional), so the native
   // module result is typed as NativeDeviceSensor[]. The runtime values are already correct, so
   // we re-type it to DeviceSensor, allowing type narrowing by checking the `os` property.
@@ -146,7 +146,9 @@ interface StartCountingOptions {
 }
 
 /** Start counting steps. */
-export function startCounting(options: StartCountingOptions): void {
+export async function startCounting(
+  options: StartCountingOptions
+): Promise<void> {
   const {
     since,
     onStep,
@@ -175,7 +177,15 @@ export function startCounting(options: StartCountingOptions): void {
       onError(event as StepErrorEvent)
     );
   }
-  ReactNativeSteps.start(resolvedSince, notification, cadence, goal);
+  return ReactNativeSteps.start(
+    resolvedSince,
+    notification,
+    cadence,
+    goal
+  ).catch((error) => {
+    clearSubscriptions();
+    throw error;
+  });
 }
 
 /** Options for {@link stopCounting}. */
@@ -190,10 +200,12 @@ interface StopCountingOptions {
 }
 
 /** Stop counting steps. */
-export function stopCounting(options?: StopCountingOptions): void {
+export async function stopCounting(
+  options?: StopCountingOptions
+): Promise<void> {
   const { clear = false } = options ?? {};
   clearSubscriptions();
-  ReactNativeSteps.stop(clear);
+  return ReactNativeSteps.stop(clear);
 }
 
 /**
@@ -204,8 +216,8 @@ export function stopCounting(options?: StopCountingOptions): void {
  * function returns `false` even if a native session is still alive. Use it to mirror the current
  * session in the UI, not as the source of truth for a backgrounded native session.
  */
-export function isCounting(): boolean {
-  return _eventSubscription != null;
+export async function isCounting(): Promise<boolean> {
+  return ReactNativeSteps.isCounting();
 }
 
 // Removes only the subscriptions registered by this library (step + optional error), leaving any

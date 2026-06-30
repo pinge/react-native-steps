@@ -156,6 +156,10 @@ class StepsForegroundService : Service(), StepsEventSink {
 
     if (intent?.action == ACTION_START) {
       handleExplicitStart(intent.getLongExtra(EXTRA_SESSION_START, System.currentTimeMillis()))
+      // Publish whether the listener actually registered so the session coordinator start() poll
+      // can resolve (registered) or reject (not registered). EXTRA_START_TOKEN is always set by
+      // startSession(), the default value is just a fallback.
+      recordStartResult(intent.getLongExtra(EXTRA_START_TOKEN, Long.MIN_VALUE), listening)
     } else {
       // A null intent with a persisted active session means a sticky restart after a process kill.
       // We rebuild the counter from the persisted session as is (config already loaded from the
@@ -206,6 +210,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     store.saveGoalConfig(goalSteps, goalPeriod, goalTitle, goalText, goalChannel, goalIcon, goalUrl)
     resetGoalRuntime(start)
     service.startService(start)
+    listening = service.isRegistered()
   }
 
   // Builds or rebuilds the step counter and seeds it to a running total without resetting it.
@@ -216,6 +221,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     stopListener()
     val service = createCounter() ?: return
     service.restoreService(start, checkpoint, accumulated)
+    listening = service.isRegistered()
   }
 
   private fun createCounter(): SensorStepCounter? {
@@ -226,6 +232,7 @@ class StepsForegroundService : Service(), StepsEventSink {
   private fun stopListener() {
     listener?.stopService()
     listener = null
+    listening = false
   }
 
   // Persists the (possibly updated) notification + cadence + goal config so a later sticky restart
@@ -563,11 +570,47 @@ class StepsForegroundService : Service(), StepsEventSink {
   override fun onDestroy() {
     listener?.stopService()
     listener = null
+    listening = false
     super.onDestroy()
   }
 
   companion object {
     private val TAG: String = StepsForegroundService::class.java.name
+
+    // Used as process global to represent a sensor listener that is registered and emitting flag
+    // for the single service instance. The service runs in the app process, so the module can read
+    // this without binding, letting isCounting() report a session that is still alive after the
+    // app was swiped away (a sticky restart re-registers the listener and sets this as true again).
+    @Volatile
+    private var listening: Boolean = false
+
+    fun isListening(): Boolean = listening
+
+    // Confirmation channel for the async start() promise. startForegroundService() only posts an
+    // intent, so the coordinator can't synchronously know when (or whether) the sensor registered.
+    // Each start() gets a globally monotonic token passed in the intent. After the service
+    // processes that ACTION_START it records the token and whether the listener ended up registered,
+    // so the coordinator can poll consumeStartResult() without binding. Process global (not bound to
+    // a service instance) so it survives an app/RN reload that hands the coordinator a fresh instance.
+    private val tokenSeq = java.util.concurrent.atomic.AtomicLong(0)
+
+    fun nextStartToken(): Long = tokenSeq.incrementAndGet()
+
+    @Volatile
+    private var lastStartToken: Long = Long.MIN_VALUE
+
+    @Volatile
+    private var lastStartListening: Boolean = false
+
+    // The registration result for token, or null when that ACTION_START has not been been processed yet.
+    fun consumeStartResult(token: Long): Boolean? =
+      if (lastStartToken >= token) lastStartListening else null
+
+    // Called by the service instance once it finishes processing an ACTION_START for token.
+    fun recordStartResult(token: Long, registered: Boolean) {
+      lastStartListening = registered
+      lastStartToken = token
+    }
     private const val CHANNEL_ID = "step_counter_background"
     private const val NOTIFICATION_ID = 0x57E95 // arbitrary, non-zero
 
@@ -588,6 +631,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     private const val ACTION_START = "org.pinge.steps.action.START"
     private const val ACTION_STOP = "org.pinge.steps.action.STOP"
     private const val EXTRA_SESSION_START = "session_start"
+    private const val EXTRA_START_TOKEN = "start_token"
     private const val EXTRA_CLEAR = "clear"
     private const val EXTRA_NOTIFICATION_TITLE = "notification_title"
     private const val EXTRA_NOTIFICATION_TEXT = "notification_text"
@@ -620,6 +664,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     fun startSession(
       context: Context,
       start: Long,
+      startToken: Long,
       notificationTitle: String,
       notificationText: String,
       notificationChannel: String,
@@ -632,6 +677,7 @@ class StepsForegroundService : Service(), StepsEventSink {
         Intent(context, StepsForegroundService::class.java).apply {
           action = ACTION_START
           putExtra(EXTRA_SESSION_START, start)
+          putExtra(EXTRA_START_TOKEN, startToken)
           putExtra(EXTRA_NOTIFICATION_TITLE, notificationTitle)
           putExtra(EXTRA_NOTIFICATION_TEXT, notificationText)
           putExtra(EXTRA_NOTIFICATION_CHANNEL, notificationChannel)

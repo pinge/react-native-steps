@@ -61,12 +61,27 @@ RCT_EXPORT_METHOD(getSensors:(RCTPromiseResolveBlock)resolve
 RCT_EXPORT_METHOD(start:(double)since
                   notification:(NSDictionary *)notification
                   cadence:(double)cadence
-                  goal:(NSDictionary *)goal) {
-  [_core startWithSince:since notification:notification cadence:cadence goal:goal];
+                  goal:(NSDictionary *)goal
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject) {
+  NSString *error = [_core startWithSince:since notification:notification cadence:cadence goal:goal];
+  if (error) {
+    reject(@"E_START_FAILED", error, nil);
+  } else {
+    resolve(nil);
+  }
 }
 
-RCT_EXPORT_METHOD(stop:(BOOL)clear) {
+RCT_EXPORT_METHOD(stop:(BOOL)clear
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject) {
   [_core stopWithClear:clear];
+  resolve(nil);
+}
+
+RCT_EXPORT_METHOD(isCounting:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject) {
+  resolve(@([_core isCounting]));
 }
 
 #pragma mark - RNStepsEventSink

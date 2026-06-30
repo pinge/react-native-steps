@@ -168,8 +168,9 @@ export interface Spec extends TurboModule {
     notification: NotificationOptions,
     cadence: number,
     goal: NativeGoal | null
-  ): void;
-  stop(clear: boolean): void;
+  ): Promise<void>;
+  stop(clear: boolean): Promise<void>;
+  isCounting(): Promise<boolean>;
   getSensors(): Promise<NativeDeviceSensor[]>;
   /* NativeEventEmitter required methods */
   addListener(event: string): void;
