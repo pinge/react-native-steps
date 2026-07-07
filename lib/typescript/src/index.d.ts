@@ -77,7 +77,11 @@ interface StartCountingOptions {
      */
     goal?: Goal;
 }
-/** Start counting steps. */
+/**
+ * Start counting steps. This function is deliberately not an async function so a cadence/goal
+ * misconfiguration can throw a RangeError synchronously before any native call or subscription
+ * instead of a promise rejection.
+ */
 export declare function startCounting(options: StartCountingOptions): Promise<void>;
 /** Options for {@link stopCounting}. */
 interface StopCountingOptions {

@@ -171,7 +171,8 @@ class StepsForegroundService : Service(), StepsEventSink {
   }
 
   // Handles an explicit start() for the requested session start. Resumes the running
-  // total when it matches the active session, otherwise begins a fresh session at 0.
+  // total when it matches the active session, otherwise begins a fresh session (at 0,
+  // or seeded with the current goal window's steps — see startFreshSession()).
   private fun handleExplicitStart(requestedStart: Long) {
     if (store.isActive && store.sessionStart == requestedStart) {
       resumeSession()
@@ -202,16 +203,65 @@ class StepsForegroundService : Service(), StepsEventSink {
     }
   }
 
-  // Begins a brand new session at 'start', resetting the running total to 0 and adopting the new config.
+  // Begins a brand new session at 'start', adopting the new config. The running total normally
+  // resets to 0, with one exception: when a goal is set and 'start' falls inside the goal period
+  // window the previous session was already tracking (e.g. the first start() after a midnight
+  // rollover the service counted through), the steps already counted in that window seed the new
+  // session's total, and the once per period notified flag is preserved. Without this, a fresh
+  // start() with the new day's 'since' would silently discard the steps the foreground service
+  // counted since midnight (the hardware counter cannot backfill them) and could re-fire an
+  // already delivered goal notification. This mirrors iOS, where a fresh start() backfills the
+  // new window via CMPedometer.
   private fun startFreshSession(start: Long) {
+    // Snapshot the carry before the listener and the persisted session are torn down.
+    val carry = goalWindowCarry(start)
     stopListener()
     val service = createCounter() ?: return
     store.startSession(start, service.sensorTypeString, notificationTitle, notificationText, notificationChannel, notificationIcon, notificationUrl, cadence)
     store.saveGoalConfig(goalSteps, goalPeriod, goalTitle, goalText, goalChannel, goalIcon, goalUrl)
-    resetGoalRuntime(start)
-    service.startService(start)
+    if (carry != null) {
+      // The carried steps become the new session's starting total, so the goal window (total minus
+      // a 0 baseline) continues seamlessly and stays consistent with what JavaScript receives.
+      goalPeriodKey = Goal.periodKey(start, goalPeriod)
+      goalBaseline = 0.0
+      goalNotified = carry.notified
+      store.saveGoalState(goalPeriodKey, goalBaseline, goalNotified)
+      store.saveProgress(carry.steps)
+      if (carry.rawCheckpoint >= 0.0) {
+        store.saveRawCheckpoint(carry.rawCheckpoint)
+      }
+      service.restoreService(start, carry.rawCheckpoint, carry.steps)
+    } else {
+      resetGoalRuntime(start)
+      service.startService(start)
+    }
     listening = service.isRegistered()
   }
+
+  // The goal window progress a fresh session starting at 'start' should carry over, or null for a
+  // plain fresh start at 0. Carrying applies only when a goal is enabled for the new session, a
+  // previous session is active, and the goal window it was tracking is the same period window that
+  // contains 'start' (so steps from a previous day never leak into the new one). The total and raw
+  // checkpoint come from the live listener when one is running (most precise), else from the store.
+  private fun goalWindowCarry(start: Long): GoalWindowCarry? {
+    if (!Goal.isEnabled(goalSteps) || !store.isActive) return null
+    val trackedKey = store.goalPeriodKey
+    if (trackedKey == 0L || trackedKey != Goal.periodKey(start, goalPeriod)) return null
+    val current = listener
+    val total = current?.currentSteps ?: store.accumulatedSteps
+    val checkpoint = current?.rawCheckpoint ?: store.rawCheckpoint
+    val windowSteps = (total - store.goalPeriodBaseline).coerceAtLeast(0.0)
+    if (windowSteps <= 0.0) return null
+    return GoalWindowCarry(windowSteps, checkpoint, store.goalNotified)
+  }
+
+  // Steps already counted in the current goal period window, the raw cumulative counter checkpoint
+  // they were measured at, and whether the goal notification already fired in this window.
+  private data class GoalWindowCarry(
+    val steps: Double,
+    val rawCheckpoint: Double,
+    val notified: Boolean,
+  )
 
   // Builds or rebuilds the step counter and seeds it to a running total without resetting it.
   // This is used to resume sessions and for sticky restarts. Stops any existing counter first
