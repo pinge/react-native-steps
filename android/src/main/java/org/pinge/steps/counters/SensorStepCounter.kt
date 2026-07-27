@@ -4,11 +4,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
-import com.facebook.react.bridge.WritableMap
 
 /**
  * The base class for hardware sensor-based step counters.
@@ -50,9 +50,10 @@ abstract class SensorStepCounter(
   // The default sensor backing this counter, or null if the device has no sensor for the counter.
   abstract val detectedSensor: Sensor?
 
-  // The 'step' event payload for the current session state.
-  val stepPayload: WritableMap
-    get() = StepEvent.build(currentSteps, startDate, endDate, sensorTypeString)
+  // The 'step' event payload for the current session state, as a process neutral Bundle (see StepsEventSink,
+  // StepEvent). We convert the payload to a WritableMap only in the main process before emitting.
+  val stepPayload: Bundle
+    get() = StepEvent.bundle(currentSteps, startDate, endDate, sensorTypeString)
 
   // The total number of steps counted since the service started.
   abstract var currentSteps: Double
@@ -98,13 +99,13 @@ abstract class SensorStepCounter(
   // Whether this counter is registered and should still deliver steps. Cleared in stopService() and
   // checked inside the main thread emit runnable, so a step the sensor thread posts after teardown is
   // dropped rather than re-firing the pipeline (e.g. re-posting a cancelled notification). We use
-  // Volatile here because start/stop may run off the main thread (the in-process fallback is driven
+  // Volatile here because start/stop may run off the main thread (the in process fallback is driven
   // from the module's @ReactMethod calls) while the guard is read on the main thread.
   @Volatile private var registered = false
 
   // Whether the sensor listener is currently registered and delivering steps. This is false before
   // startService()/restoreService(), when no sensor of this type exists (registerSensor() bails),
-  // and after stopService(). Used by the session coordinator in isCounting() for the in-process path.
+  // and after stopService(). Used by the session coordinator in isCounting() for the in process path.
   fun isRegistered(): Boolean = registered
 
   fun startService(start: Long) {

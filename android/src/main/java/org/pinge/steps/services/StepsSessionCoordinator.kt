@@ -8,9 +8,12 @@ import android.hardware.SensorManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
+import android.os.Message
+import android.os.Messenger
+import android.os.RemoteException
 import android.util.Log
 import com.facebook.react.bridge.ReactApplicationContext
+import java.util.concurrent.atomic.AtomicLong
 import org.pinge.steps.capabilities.AndroidCapabilities
 import org.pinge.steps.capabilities.Permissions
 import org.pinge.steps.counters.SensorStepCounter
@@ -18,16 +21,24 @@ import org.pinge.steps.counters.StepCounterFactory
 import org.pinge.steps.counters.StepsEventSink
 
 /**
- * Coordinates the step counting session lifecycle with three responsibilities: choosing between
- * the StepsForegroundService and the in-process fallback, binding/unbinding the service, and
- * replaying the accumulated total on (re)connect.
+ * Coordinates the step counting session lifecycle from the main (React Native) process.
  *
- * Step counting runs inside the background service so the app can be backgrounded or swiped away
- * from recents. On API 34+ a 'health' foreground service requires the ACTIVITY_RECOGNITION.
- * permission. When this permission is not granted, we fall back to in-process counting, which
- * only counts steps when the app process is alive.
+ * Step counting runs in the StepsForegroundService, which lives in a separate :steps process so the
+ * whole app process is not pinned alive by the foreground service (e.g. the UI / React Native process
+ * can be killed when swiping the app away in recents and cold started cleanly on reopen. Because the
+ * service is in another process, this coordinator talks to it over a Messenger. Issued commands to
+ * start/stop counting are issued as intents (only an intent confers the foreground service start grant),
+ * and all other feedback (step/error events, start/stop confirmations, and the listening state) comes
+ * back over the Messenger reply channel.
  *
- * This class does not handle event emitting, sink receives every event.
+ * There is deliberately no ContentProvider and no cross process SharedPreferences read: those are
+ * the mechanisms/libraries that would pin the main process alive. A Messenger bind pins the service
+ * process (:steps, already kept alive by the foreground service), and never this client.
+ *
+ * All Messenger/binding state is confined to the main looper (the IncomingHandler and every setup
+ * block post here), so it requires no locking. Only the in process accelerometer fallback (used when
+ * ACTIVITY_RECOGNITION is not granted and a 'health' foreground service therefore cannot start) runs
+ * in this process and is guarded by sessionLock.
  */
 class StepsSessionCoordinator(
   private val context: ReactApplicationContext,
@@ -36,78 +47,92 @@ class StepsSessionCoordinator(
   private companion object {
     val TAG_NAME: String = StepsSessionCoordinator::class.java.name
 
-    // Polling timeouts used to confirm the async foreground service start/stop. The service start
-    // is an intent posted to the main looper, so we poll the process global result it records
-    // instead of blocking. A foreground service normally registers in under a second.
-    const val POLL_INTERVAL_MS = 50L
+    // How long start()/stop()/isCounting() wait for the service's Messenger reply before resolving
+    // best effort. A foreground service normally registers in well under a second.
     const val START_CONFIRM_TIMEOUT_MS = 5_000L
     const val STOP_CONFIRM_TIMEOUT_MS = 3_000L
+    const val STATE_QUERY_TIMEOUT_MS = 2_000L
   }
 
-  // Handles the short start/stop confirmation polling. The main looper avoids spinning up a new
-  // thread and makes resolving the React promise from a consistent place trivial.
-  private val pollHandler = Handler(Looper.getMainLooper())
+  // The single main looper handler that serializes all foreground service IPC state and timeouts.
+  private val main = Handler(Looper.getMainLooper())
 
   private val sensorManager: SensorManager =
     context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
-  // Used only to wipe persisted state on a stop(true). Shares the same SharedPreferences as the
-  // foreground service's own store.
+  // Used only to wipe persisted state on a stop(true) taken by the in process fallback path (the
+  // background service owns and clears its own store). Shares the same SharedPreferences file.
   private val store: StepsSessionStore = StepsSessionStore(context)
 
-  /**
-   * Guards all mutable session state (serviceBinder, bindRequested, inProcessListener). The binding
-   * is touched from the ServiceConnection callbacks (main thread) and from the start/stop/dispose
-   * paths (module queue / thread teardown), so every access is serialized here. The session lock
-   * makes sure that emits that arrive while holding the lock (replay => sink) never re-enter it
-   * to avoid deadlock.
-   */
-  private val sessionLock = Any()
-
-  // Application context used for bind/unbind, so teardown time unbind can never touch a
-  // half-invalidated React context, and so bind and unbind always use the same Context.
+  // Application context used for bind/unbind and starting the service, so teardown time unbind never
+  // touches a half invalidated React context and bind/unbind always use the same Context.
   private val bindContext: Context = context.applicationContext
 
-  // Binder of the bound foreground service, or null while no service is connected.
-  // Guarded by sessionLock.
-  private var serviceBinder: StepsForegroundService.LocalBinder? = null
+  // Monotonic token correlating each start() to the service's MSG_START_RESULT (was a process-global
+  // static; now local since results come back over the Messenger, not a shared static).
+  private val tokenSeq = AtomicLong(0)
 
-  // Whether bindContext has an outstanding binding request.
-  // Guarded by sessionLock.
+  // IPC state
+  private var serviceMessenger: Messenger? = null
   private var bindRequested = false
+  private var pendingStart: PendingStart? = null
+  private val pendingState = mutableListOf<(Boolean) -> Unit>()
+  private var pendingStateTimeout: Runnable? = null
+  private var pendingStop: (() -> Unit)? = null
+  private var pendingStopTimeout: Runnable? = null
 
-  // Fallback listener used when a background service cannot be started.
-  // Guarded by sessionLock.
+  private class PendingStart(val token: Long, val callback: (String?) -> Unit) {
+    var timeout: Runnable? = null
+  }
+
+  // Our reply Messenger: the service sends MSG_STEP/MSG_ERROR/MSG_START_RESULT/MSG_STATE/MSG_STOPPED here.
+  private val incomingMessenger = Messenger(IncomingHandler())
+
+  // sessionLock is only used in the in process fallback
+  private val sessionLock = Any()
   private var inProcessListener: SensorStepCounter? = null
+
+  private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
+    override fun handleMessage(msg: Message) {
+      when (msg.what) {
+        StepsForegroundService.MSG_STEP -> sink.emitStep(msg.data)
+        StepsForegroundService.MSG_ERROR ->
+          sink.emitError(msg.data.getString(StepsForegroundService.KEY_MESSAGE) ?: "")
+        StepsForegroundService.MSG_START_RESULT ->
+          resolveStart(
+            msg.data.getLong(StepsForegroundService.KEY_TOKEN),
+            msg.data.getBoolean(StepsForegroundService.KEY_REGISTERED),
+          )
+        StepsForegroundService.MSG_STATE ->
+          resolveState(msg.data.getBoolean(StepsForegroundService.KEY_LISTENING))
+        StepsForegroundService.MSG_STOPPED -> resolveStop()
+        else -> super.handleMessage(msg)
+      }
+    }
+  }
 
   private val connection =
     object : ServiceConnection {
-      override fun onServiceConnected(
-        name: ComponentName?,
-        service: IBinder?,
-      ) {
-        val binder = service as? StepsForegroundService.LocalBinder ?: return
-        synchronized(sessionLock) {
-          serviceBinder = binder
-          // Attaching the callback immediately replays/emits the accumulated total to JavaScript.
-          // We hold this invocation under the session lock to avoid having connect interleaving
-          // with stop() or dispose().
-          binder.setLiveCallback(sink)
-        }
+      override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+        val binder = service ?: return
+        serviceMessenger = Messenger(binder)
+        // Register our reply Messenger. The service replies with MSG_STATE and replays the running total.
+        sendRegister()
       }
 
       override fun onServiceDisconnected(name: ComponentName?) {
-        synchronized(sessionLock) { serviceBinder = null }
+        serviceMessenger = null
       }
     }
 
   /**
-   * Starts a step counting session covering start. Prefers a foreground service, but falls back to
-   * in-process counting when a 'health' foreground service can't be started (see canRunBackgroundService).
+   * Starts a step counting session covering start. Prefers the background foreground service, but
+   * falls back to in process counting when a 'health' foreground service can't be started (see
+   * canRunBackgroundService).
    *
-   * Invokes onResult() once: to null when a step counting session is active (the sensor listener
-   * is registered), or an error message when it could not start (no usable sensor, the foreground
-   * service could not be launched, or the confirmation timed out).
+   * Invokes onResult() once: null when a session is active (the sensor registered), or an error
+   * message when it could not start (no usable sensor, the service could not be launched, or the
+   * confirmation timed out).
    */
   fun start(
     start: Long,
@@ -116,181 +141,257 @@ class StepsSessionCoordinator(
     goal: StepsGoalOptions?,
     onResult: (String?) -> Unit,
   ) {
-    if (canRunBackgroundService()) {
-      startBackgroundSession(start, notification, cadence, goal, onResult)
-    } else {
-      // The in-process fallback (no ACTIVITY_RECOGNITION) does not evaluate goals, it is in-memory
-      // only and counts steps only while the app process is alive. Goal notifications are
-      // background service only (for now?).
-      // TODO explore goal notifications with in-process fallback
+    if (!canRunBackgroundService()) {
+      // In process fallback (no ACTIVITY_RECOGNITION). In-memory only, counts only while the app
+      // process is alive, and does not evaluate goals. Registration is synchronous on this thread.
       startInProcessSession(start, cadence, onResult)
+      return
     }
-  }
+    val token = tokenSeq.incrementAndGet()
+    main.post {
+      synchronized(sessionLock) { stopInProcessSession() }
+      // Supersede any previous unresolved start, only the latest token is awaited.
+      pendingStart?.timeout?.let { main.removeCallbacks(it) }
+      val p = PendingStart(token, onResult)
+      pendingStart = p
 
-  /*
-   * Stops step counting, ends in-process fallback (if any), unbinds, and stops the foreground
-   * service. If 'clear' is true, the persisted state is wiped in addition to stopping. In background
-   * service mode the service clears the persisted state after stopping its sensor. In in-process
-   * fallback mode there is no foreground service to process clearing the persisted state, so we
-   * wipe it here (the in-process counter does not touch the store, so no race conditions).
-   */
-  fun stop(clear: Boolean, onDone: () -> Unit) {
-    stopInProcessSession()
-    unbindFromService()
-    if (clear && !canRunBackgroundService()) {
-      store.clear()
+      val error: String? =
+        try {
+          StepsForegroundService.startSession(
+            bindContext,
+            start,
+            token,
+            notification.title,
+            notification.text,
+            notification.channel,
+            notification.icon,
+            notification.url,
+            cadence,
+            goal,
+          )
+          null
+        } catch (e: IllegalStateException) {
+          // e.g. ForegroundServiceStartNotAllowedException when started from the background on API 31+.
+          Log.w(TAG_NAME, "Could not start the foreground service", e)
+          "could not start the step counting foreground service"
+        } catch (e: SecurityException) {
+          Log.w(TAG_NAME, "Missing permission to start the foreground service", e)
+          "missing permission to start the step counting foreground service"
+        }
+
+      if (error != null) {
+        if (pendingStart === p) pendingStart = null
+        onResult(error)
+        return@post
+      }
+
+      // Bind so we receive the MSG_START_RESULT (and subsequent live events). The service records the
+      // start result and flushes it on our registration, so the bind/intent ordering doesn't race.
+      ensureBound()
+      // Guard the main process so if the app is swept away it force quits the UI and on reopen it has
+      // a clean cold start (the :steps counting process is separate and keeps running). Only while
+      // background counting.
+      startProcessGuard()
+      val timeout =
+        Runnable {
+          if (pendingStart === p) {
+            pendingStart = null
+            onResult("step counting did not start in time")
+          }
+        }
+      p.timeout = timeout
+      main.postDelayed(timeout, START_CONFIRM_TIMEOUT_MS)
     }
-    StepsForegroundService.stopSession(context, clear)
-    // Resolve once the listener is actually torn down. For the in-process path, isListening() is
-    // false and this resolves on the first poll. For the the foreground service, it stops once the
-    // service processes ACTION_STOP.
-    pollStopResult(onDone)
-  }
-
-  // Releases the coordinator when the React context is torn down. Unbind but leave the foreground
-  // service running so step counting can continue. A running in-process fallback is stopped.
-  fun dispose() {
-    pollHandler.removeCallbacksAndMessages(null)
-    stopInProcessSession()
-    unbindFromService()
   }
 
   /**
-   * Whether step events are actively being produced right now, via either the foreground service
-   * or the in-process fallback. On Android we perform no permission check since a registered
-   * fallback listener using accelerometer (ACTIVITY_RECOGNITION denied) is still emitting.
+   * Stops step counting. By default this is a pause: the service stops its sensor but keeps the
+   * persisted session (a later start() with the same 'since' resumes the running total). When
+   * 'clear' is true it also wipes the persisted session. Invokes onDone() once counting has stopped
+   * (on the service's MSG_STOPPED confirmation, or best effort on timeout).
    */
-  fun isCounting(): Boolean =
-    StepsForegroundService.isListening() ||
-      synchronized(sessionLock) { inProcessListener?.isRegistered() == true }
-
-  // Foreground service
-
-  // Whether a foreground service can be started in the background. Below API level 34 there is no
-  // foreground service type. On API 34+ the 'health' type requires ACTIVITY_RECOGNITION at runtime.
-  private fun canRunBackgroundService(): Boolean =
-    !AndroidCapabilities.requiresHealthForegroundServiceGate() ||
-      Permissions.isActivityRecognitionGranted(context)
-
-  private fun startBackgroundSession(
-    start: Long,
-    notification: StepsNotificationOptions,
-    cadence: Double,
-    goal: StepsGoalOptions?,
-    onResult: (String?) -> Unit,
-  ) {
-    // This globally monotonic token ties this start to the result the service records when it
-    // processes the ACTION_START intent. See recordStartResult() and consumeStartResult() in
-    // StepsForegroundService.
-    val startToken = StepsForegroundService.nextStartToken()
-    synchronized(sessionLock) {
-      stopInProcessSession()
-      try {
-        StepsForegroundService.startSession(
-          context,
-          start,
-          startToken,
-          notification.title,
-          notification.text,
-          notification.channel,
-          notification.icon,
-          notification.url,
-          cadence,
-          goal,
-        )
-      } catch (e: IllegalStateException) {
-        // e.g. ForegroundServiceStartNotAllowedException when started from the background on API 31+.
-        Log.w(TAG_NAME, "Could not start the foreground service", e)
-        onResult("could not start the step counting foreground service")
-        return
-      } catch (e: SecurityException) {
-        Log.w(TAG_NAME, "Missing permission to start the foreground service", e)
-        onResult("missing permission to start the step counting foreground service")
-        return
+  fun stop(clear: Boolean, onDone: () -> Unit) {
+    synchronized(sessionLock) { stopInProcessSession() }
+    val background = canRunBackgroundService()
+    // The background service clears its own store on an ACTION_STOP with clear, only the in process
+    // path (no service) needs us to wipe its store here.
+    if (clear && !background) store.clear()
+    main.post {
+      StepsForegroundService.stopSession(bindContext, clear)
+      // Counting is stopping, so the main process no longer needs to force quit on swipe.
+      stopProcessGuard()
+      if (!background) {
+        // In process fallback: there is no foreground service session to confirm over the Messenger.
+        onDone()
+        return@post
       }
-      if (!bindRequested) {
-        val intent = Intent(bindContext, StepsForegroundService::class.java)
-        bindContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
-        bindRequested = true
-      } else {
-        // Already bound in this process; resume and replay the accumulated total.
-        serviceBinder?.replayCurrent()
+      pendingStop = onDone
+      val timeout =
+        Runnable {
+          Log.w(TAG_NAME, "Stop confirmation timed out; resolving best effort")
+          resolveStop()
+        }
+      pendingStopTimeout = timeout
+      main.postDelayed(timeout, STOP_CONFIRM_TIMEOUT_MS)
+    }
+  }
+
+  /**
+   * Whether step events are actively being produced right now. This is resolved asynchronously
+   * because the background service lives in another process. Reports true when the in process
+   * fallback is registered, or when the :steps foreground service replies that its sensor listener
+   * is live, including on a fresh JavaScript context after a recents swipe away, where binding
+   * connects to the surviving service. Resolves false (and releases a query-only binding) when
+   * nothing is counting.
+   */
+  fun isCounting(onResult: (Boolean) -> Unit) {
+    val fallbackActive = synchronized(sessionLock) { inProcessListener?.isRegistered() == true }
+    if (fallbackActive) {
+      onResult(true)
+      return
+    }
+    main.post {
+      pendingState.add(onResult)
+      ensureBound()
+      val target = serviceMessenger
+      if (target != null) {
+        // Already connected, ask for a one off state reply without re-registering as event client.
+        trySend(target, StepsForegroundService.MSG_QUERY_STATE) { it.replyTo = incomingMessenger }
+      }
+      // Otherwise onServiceConnected -> sendRegister() -> the service replies MSG_STATE.
+      if (pendingStateTimeout == null) {
+        val timeout =
+          Runnable {
+            pendingStateTimeout = null
+            drainPendingState(false)
+          }
+        pendingStateTimeout = timeout
+        main.postDelayed(timeout, STATE_QUERY_TIMEOUT_MS)
       }
     }
-    pollStartResult(startToken, onResult)
   }
 
-  // Polls the result the service records for start token until it is known or the timeout expires,
-  // then invokes onResult() once. Runs on the main looper so it never blocks the React method queue.
-  private fun pollStartResult(token: Long, onResult: (String?) -> Unit) {
-    val deadline = SystemClock.uptimeMillis() + START_CONFIRM_TIMEOUT_MS
-    pollHandler.post(
-      object : Runnable {
-        override fun run() {
-          when (StepsForegroundService.consumeStartResult(token)) {
-            true -> onResult(null)
-            false -> onResult("no usable step counting sensor")
-            null ->
-              if (SystemClock.uptimeMillis() >= deadline) {
-                onResult("step counting did not start in time")
-              } else {
-                pollHandler.postDelayed(this, POLL_INTERVAL_MS)
-              }
-          }
-        }
-      },
-    )
+  // Releases the coordinator when the React context is torn down. Unbind but leave the foreground
+  // service running so background step counting continues. A running in process fallback is stopped.
+  fun dispose() {
+    synchronized(sessionLock) { stopInProcessSession() }
+    main.post {
+      unregisterAndUnbind()
+      pendingStart?.timeout?.let { main.removeCallbacks(it) }
+      pendingStart = null
+      pendingStopTimeout?.let { main.removeCallbacks(it) }
+      pendingStopTimeout = null
+      pendingStop = null
+      pendingStateTimeout?.let { main.removeCallbacks(it) }
+      pendingStateTimeout = null
+      pendingState.clear()
+    }
   }
 
-  // Polls until the foreground service listener is torn down or the timeout expires, then invokes
-  // onDone() once. This is a best effort approach, since stop() is a pause that always succeeds,
-  // so a timeout still resolves.
-  private fun pollStopResult(onDone: () -> Unit) {
-    val deadline = SystemClock.uptimeMillis() + STOP_CONFIRM_TIMEOUT_MS
-    pollHandler.post(
-      object : Runnable {
-        override fun run() {
-          when {
-            !StepsForegroundService.isListening() -> onDone()
-            SystemClock.uptimeMillis() >= deadline -> {
-              Log.w(TAG_NAME, "Stop confirmation timed out; resolving best-effort")
-              onDone()
-            }
-            else -> pollHandler.postDelayed(this, POLL_INTERVAL_MS)
-          }
-        }
-      },
-    )
+  // ----- Messenger helpers (main looper) -----
+
+  private fun resolveStart(token: Long, registered: Boolean) {
+    val p = pendingStart ?: return
+    if (p.token != token) return
+    p.timeout?.let { main.removeCallbacks(it) }
+    pendingStart = null
+    p.callback(if (registered) null else "no usable step counting sensor")
   }
 
-  // Caller must hold sessionLock.
-  private fun unbindServiceSafely() {
+  private fun resolveStop() {
+    val cb = pendingStop ?: return
+    pendingStop = null
+    pendingStopTimeout?.let { main.removeCallbacks(it) }
+    pendingStopTimeout = null
+    // A stop is a pause; release the binding so an idle :steps process can be torn down. A later
+    // start() re-binds.
+    unregisterAndUnbind()
+    cb()
+  }
+
+  private fun resolveState(listening: Boolean) {
+    pendingStateTimeout?.let { main.removeCallbacks(it) }
+    pendingStateTimeout = null
+    drainPendingState(listening)
+    // If nothing is running and no start is in flight, drop a query-only binding so an idle :steps
+    // process is not kept alive just because isCounting() was called.
+    if (!listening && pendingStart == null) unregisterAndUnbind()
+  }
+
+  private fun drainPendingState(listening: Boolean) {
+    val waiters = pendingState.toList()
+    pendingState.clear()
+    waiters.forEach { it(listening) }
+  }
+
+  private fun ensureBound() {
+    if (bindRequested) return
+    val intent = Intent(bindContext, StepsForegroundService::class.java)
+    bindRequested =
+      try {
+        bindContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+      } catch (e: SecurityException) {
+        Log.w(TAG_NAME, "bindService failed", e)
+        false
+      }
+  }
+
+  private fun sendRegister() {
+    val target = serviceMessenger ?: return
+    trySend(target, StepsForegroundService.MSG_REGISTER_CLIENT) { it.replyTo = incomingMessenger }
+  }
+
+  private fun unregisterAndUnbind() {
+    if (!bindRequested) {
+      serviceMessenger = null
+      return
+    }
+    serviceMessenger?.let { trySend(it, StepsForegroundService.MSG_UNREGISTER_CLIENT) }
     try {
       bindContext.unbindService(connection)
     } catch (e: IllegalArgumentException) {
       Log.w(TAG_NAME, "unbindService called without an active binding", e)
     }
     bindRequested = false
+    serviceMessenger = null
   }
 
-  /**
-   * Detachs the live callback and unbind from the background service, leaving the service running.
-   * Shared by stop(), which then also stops the service, and by dispose(), which leaves it running
-   * so background step counting can continue on a React context teardown.
-   */
-  private fun unbindFromService() {
-    synchronized(sessionLock) {
-      if (bindRequested) {
-        serviceBinder?.clearLiveCallback()
-        unbindServiceSafely()
-      }
-      serviceBinder = null
+  private fun trySend(target: Messenger, what: Int, configure: (Message) -> Unit = {}) {
+    try {
+      target.send(Message.obtain(null, what).also(configure))
+    } catch (e: RemoteException) {
+      Log.w(TAG_NAME, "service Messenger is dead; dropping the binding", e)
+      serviceMessenger = null
     }
   }
 
-  // in-process fallback
+  // Starts the main process guard so when the app is swept away in recents, it force quits the UI
+  // process (see StepsProcessGuardService), guaranteeing a cold start on reopen. The :steps counting
+  // process is separate and keeps running. Started only while a background session is active. The app
+  // is in the foreground when start() is called (a user action), so the plain startService is allowed.
+  private fun startProcessGuard() {
+    try {
+      bindContext.startService(Intent(bindContext, StepsProcessGuardService::class.java))
+    } catch (e: RuntimeException) {
+      Log.w(TAG_NAME, "could not start the process guard", e)
+    }
+  }
+
+  private fun stopProcessGuard() {
+    try {
+      bindContext.stopService(Intent(bindContext, StepsProcessGuardService::class.java))
+    } catch (e: RuntimeException) {
+      Log.w(TAG_NAME, "could not stop the process guard", e)
+    }
+  }
+
+  // Whether a foreground service can be started in the background. Below API 34 there is no
+  // foreground service type gate. On API 34+ the 'health' type requires ACTIVITY_RECOGNITION at runtime.
+  private fun canRunBackgroundService(): Boolean =
+    !AndroidCapabilities.requiresHealthForegroundServiceGate() ||
+      Permissions.isActivityRecognitionGranted(context)
+
   private fun startInProcessSession(start: Long, cadence: Double, onResult: (String?) -> Unit) {
-    // Registration (and its result) is synchronous on this thread.
     val registered =
       synchronized(sessionLock) {
         stopInProcessSession()

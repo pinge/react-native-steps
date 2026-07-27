@@ -15,14 +15,14 @@ object AndroidCapabilities {
   fun supportsNotificationChannels(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 
   /**
-   * The 'health' foreground-service type and its accompanying runtime permission gate only exist
+   * The 'health' foreground service type and its accompanying runtime permission gate only exist
    * from Android API level 34. Below API 34 a foreground service can be started without satisfying
    * a per type permission requirement.
    */
   fun requiresHealthForegroundServiceGate(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 
   /**
-   * The foreground-service type passed to ServiceCompat.startForeground.
+   * The foreground service type passed to ServiceCompat.startForeground.
    *
    * - API 34+ : ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH (256), matching the manifest 'health'
    *   type. This is the only API level that enforces the runtime-permission gate.

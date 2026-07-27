@@ -26,10 +26,42 @@
   <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
 
   <application>
+    <!--
+      Runs in a dedicated ":steps" process. The foreground service exempts its process from being
+      killed when the app is swept away in recents, so hosting it in a separate process lets the
+      main UI/React Native process be killed and cold start cleanly on reopen. This avoids stale
+      React context bugs with libraries like react-native-screens when using its device orientation
+      features or when using react-native-gesture-handler tap gestures when restarting the app
+      without killing the process. Step counting and data persistence are responsibilities of this
+      process. The main process talks to it over a Messenger (see StepsSessionCoordinator). Apps
+      that use this library must guard React Native initialization to the main process in their
+      MainApplication.kt when overriding onCreate():
+
+      override fun onCreate() {
+        super.onCreate()
+        if (!StepsProcess.isMainProcess(this)) return
+        SoLoader.init(this, OpenSourceMergedSoMapping)
+        ...
+      }
+
+    -->
     <service
       android:name=".services.StepsForegroundService"
       android:exported="false"
-      android:foregroundServiceType="health" />
+      android:foregroundServiceType="health"
+      android:process=":steps"
+    />
+
+    <!--
+      Runs in the main process (no android:process). While a background step counting session is active
+      it force quits the UI process if the app is swept away from recents, so when the app is reopened
+      it is always a clean cold start, avoiding stale React context from the previous session.
+    -->
+    <service
+      android:name=".services.StepsProcessGuardService"
+      android:exported="false"
+    />
+
   </application>
 
 </manifest>

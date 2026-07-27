@@ -9,14 +9,18 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.SensorManager
 import android.net.Uri
-import android.os.Binder
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.Message
+import android.os.Messenger
+import android.os.RemoteException
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import com.facebook.react.bridge.WritableMap
 import org.pinge.steps.capabilities.AndroidCapabilities
 import org.pinge.steps.counters.Cadence
 import org.pinge.steps.counters.Goal
@@ -26,30 +30,50 @@ import org.pinge.steps.counters.StepEvent
 import org.pinge.steps.counters.StepsEventSink
 
 /**
- * Foreground service that owns the step counting sensor independently of the React Native
- * process, so counting continues while the app is backgrounded or swiped away from recents.
+ * Foreground service that owns the step counting sensor. It runs in a separate :steps process
+ * (see AndroidManifest `android:process`), so counting continues while the app is running in the
+ * background or is swiped away from recents, and crucially only this process is pinned alive by
+ * the foreground service, leaving the main React Native process free to be killed and cold start
+ * cleanly on reopen. This process does NOT initialize React Native, so nothing here touches React
+ * Native types (we use plain Bundle instances in step event payloads).
  *
- * Lifecycle:
- * - The StepCounterModule starts this service via startSession() and binds to it. While bound,
- *   live updates are forwarded to JavaScript through the module's StepsEventSink; on connect,
- *   the module receives an immediate replayCurrent of the accumulated session total.
- * - When the app closes, the module unbinds but leaves the service started, so it keeps counting
- *   and persisting progress via StepsSessionStore. On a sticky restart (process killed under
- *   memory pressure) the persisted session is resumed.
- * - stopSession() ends the session, clears persistence, and removes the notification.
+ * Lifecycle and IPC:
+ * - The main process StepsSessionCoordinator starts this service with an intent (startSession())
+ *   and binds to it over a Messenger. While bound, step/error events, start/stop confirmations,
+ *   and the listening state are sent back to the coordinator's reply Messenger. On registration,
+ *   the client gets an immediate MSG_STATE + a replay of the accumulated session total.
+ * - When the app closes, the coordinator unbinds but leaves the service started, so it keeps counting
+ *   steps and persisting progress via StepsSessionStore. On a sticky restart (e.g. process killed
+ *   under memory pressure) the persisted session is resumed.
+ * - stopSession() (ACTION_STOP) pauses/ends the session, and confirms via MSG_STOPPED.
  *
  * We gracefully degrade down to API level/minSdk 24. Notification channels, the
  * startForegroundService() entry point, the POST_NOTIFICATIONS / 'health' type runtime
  * gate, and foreground service types are all guarded through AndroidCapabilities.
  */
 class StepsForegroundService : Service(), StepsEventSink {
-  private val binder = LocalBinder()
+  // This service runs in a separate :steps process (see AndroidManifest). The main (React Native)
+  // process binds to it and talks over this Messenger. A plain in process callback cannot cross the
+  // process boundary. onBind hands back messenger.binder, the client registers a reply Messenger.
+  private val messenger = Messenger(IncomingHandler())
+
+  // The registered main process reply Messenger (null while no client is connected). Step/error
+  // events and start/stop confirmations are sent to it.
+  private var client: Messenger? = null
+
+  // The most recent ACTION_START confirmation (token + whether the sensor registered). Stashed so a
+  // client that registers after the start was processed still receives the result.
+  // See IncomingHandler.MSG_REGISTER_CLIENT and sendStartResult).
+  private var lastStartToken: Long = Long.MIN_VALUE
+  private var lastStartRegistered: Boolean = false
+
+  // Whether the sensor listener is currently registered and emitting. Lives in this :steps process.
+  // The main process learns it over the Messenger (MSG_STATE), never by reading a static.
+  private var listening: Boolean = false
+
   private lateinit var store: StepsSessionStore
   private var sensorManager: SensorManager? = null
   private var listener: SensorStepCounter? = null
-
-  // The bound module's event sink (null while no React context is connected).
-  private var liveCallback: StepsEventSink? = null
 
   // Resolved notification strings (defaults filled in by the JS layer). Kept in memory for the
   // current process and persisted via the store so a no-JS sticky restart can re-render them.
@@ -92,20 +116,57 @@ class StepsForegroundService : Service(), StepsEventSink {
   private var goalBaseline: Double = 0.0
   private var goalNotified: Boolean = false
 
-  // Binder handed to a bound StepCounterModule so it can attach a live
-  // forwarding sink and pull the current accumulated total on (re)connect.
-  inner class LocalBinder : Binder() {
-    fun setLiveCallback(callback: StepsEventSink) {
-      liveCallback = callback
-      replayCurrent()
+  // Receives messages from the bound main process client. Runs on the main looper of the :steps
+  // process, the same thread the sensor pipeline delivers on, so no cross thread synchronization of
+  // the service fields is needed.
+  private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
+    override fun handleMessage(msg: Message) {
+      when (msg.what) {
+        MSG_REGISTER_CLIENT -> {
+          client = msg.replyTo
+          sendState()
+          replayCurrent()
+          // Flush a start result the client missed by registering after the start was processed.
+          if (lastStartToken != Long.MIN_VALUE) sendStartResult(lastStartToken, lastStartRegistered)
+        }
+        MSG_UNREGISTER_CLIENT -> if (msg.replyTo == null || msg.replyTo == client) client = null
+        // A stateless probe (used by isCounting on a fresh reopen): reply with the listening state to
+        // the sender without registering it as the live event client.
+        MSG_QUERY_STATE -> msg.replyTo?.let { sendStateTo(it) }
+        else -> super.handleMessage(msg)
+      }
     }
-
-    fun clearLiveCallback() {
-      liveCallback = null
-    }
-
-    fun replayCurrent() = this@StepsForegroundService.replayCurrent()
   }
+
+  // Sends a message + optional data Bundle to the registered client, dropping the client if its
+  // process has died (RemoteException).
+  private fun sendToClient(what: Int, data: Bundle? = null) {
+    val target = client ?: return
+    if (!trySend(target, what, data)) client = null
+  }
+
+  private fun trySend(target: Messenger, what: Int, data: Bundle?): Boolean =
+    try {
+      target.send(Message.obtain(null, what).apply { data?.let { this.data = it } })
+      true
+    } catch (e: RemoteException) {
+      Log.w(TAG, "client Messenger is dead; dropping", e)
+      false
+    }
+
+  private fun sendState() = sendToClient(MSG_STATE, Bundle().apply { putBoolean(KEY_LISTENING, listening) })
+
+  private fun sendStateTo(target: Messenger) =
+    trySend(target, MSG_STATE, Bundle().apply { putBoolean(KEY_LISTENING, listening) })
+
+  private fun sendStartResult(token: Long, registered: Boolean) =
+    sendToClient(
+      MSG_START_RESULT,
+      Bundle().apply {
+        putLong(KEY_TOKEN, token)
+        putBoolean(KEY_REGISTERED, registered)
+      },
+    )
 
   override fun onCreate() {
     super.onCreate()
@@ -113,7 +174,7 @@ class StepsForegroundService : Service(), StepsEventSink {
     sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
   }
 
-  override fun onBind(intent: Intent?): IBinder = binder
+  override fun onBind(intent: Intent?): IBinder = messenger.binder
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     // Resolve the notification strings, max cadence and goal config before going foreground.
@@ -135,12 +196,15 @@ class StepsForegroundService : Service(), StepsEventSink {
       // persisted session and removes the goal notification, so a later start() always as a fresh
       // session regardless of 'since'.
       stopCounting(intent.getBooleanExtra(EXTRA_CLEAR, false))
+      // Confirm the stop to the bound client (resolves stopCounting()'s promise). Sent before
+      // stopSelf so the client hears it even if the service instance is then destroyed.
+      sendToClient(MSG_STOPPED)
       // We use stopSelf(startId) here and not stopSelf(). During a quick stop()->start() restart a newer
       // ACTION_START has already advanced the start id, so this becomes a no-op and the service instance
-      // is not destroyed. That keeps the bound instance (and the live callback attached to it) alive
-      // across the restart, so onStep keeps firing. The unconditional stopSelf() would instead tore the
+      // is not destroyed. That keeps the bound instance (and the registered client Messenger) alive
+      // across the restart, so onStep keeps firing. The unconditional stopSelf() would instead tear the
       // counting instance down, and JavaScript only recovers dozens of seconds later once START_STICKY
-      // restarted and re-bounded the instance. When this really is a terminate (no start racing condition),
+      // restarted and re-bound the instance. When this really is a terminate (no start racing condition),
       // startId is the latest, so the service stops.
       stopSelf(startId)
       return START_NOT_STICKY
@@ -156,10 +220,14 @@ class StepsForegroundService : Service(), StepsEventSink {
 
     if (intent?.action == ACTION_START) {
       handleExplicitStart(intent.getLongExtra(EXTRA_SESSION_START, System.currentTimeMillis()))
-      // Publish whether the listener actually registered so the session coordinator start() poll
-      // can resolve (registered) or reject (not registered). EXTRA_START_TOKEN is always set by
-      // startSession(), the default value is just a fallback.
-      recordStartResult(intent.getLongExtra(EXTRA_START_TOKEN, Long.MIN_VALUE), listening)
+      // Report whether the listener actually registered so the coordinator's start() promise can
+      // resolve (registered) or reject (not). EXTRA_START_TOKEN, always set by startSession(),
+      // correlates this result to the awaiting start. Stash it so a client that registers slightly
+      // later still gets it (see IncomingHandler.MSG_REGISTER_CLIENT).
+      val token = intent.getLongExtra(EXTRA_START_TOKEN, Long.MIN_VALUE)
+      lastStartToken = token
+      lastStartRegistered = listening
+      sendStartResult(token, listening)
     } else {
       // A null intent with a persisted active session means a sticky restart after a process kill.
       // We rebuild the counter from the persisted session as is (config already loaded from the
@@ -402,7 +470,7 @@ class StepsForegroundService : Service(), StepsEventSink {
   private fun notificationSteps(total: Double): Double =
     if (Goal.isEnabled(goalSteps)) total - goalBaseline else total
 
-  override fun emitStep(data: WritableMap) {
+  override fun emitStep(data: Bundle) {
     val total = listener?.currentSteps ?: store.accumulatedSteps
     store.saveProgress(total)
     val checkpoint = listener?.rawCheckpoint ?: StepsSessionStore.RAW_UNSET
@@ -413,33 +481,33 @@ class StepsForegroundService : Service(), StepsEventSink {
     // then display the possibly goal windowed count.
     evaluateGoal(total)
     updateNotification(notificationSteps(total))
-    // Forward the event to JavaScript only when a React context is connected,
-    // otherwise we just persist progress.
-    liveCallback?.emitStep(data)
+    // Forward the event across the process boundary only when a client is connected. Otherwise we
+    // just persist progress and let the client replay it on (re)connect.
+    sendToClient(MSG_STEP, data)
   }
 
   override fun emitError(message: String) {
-    liveCallback?.emitError(message)
+    sendToClient(MSG_ERROR, Bundle().apply { putString(KEY_MESSAGE, message) })
   }
 
-  // Re-emit the current accumulated total to the bound module so JavaScript sees a continuous
+  // Re-emit the current accumulated total to the bound client so JavaScript sees a continuous
   // count immediately on (re)connect, including any steps gathered while the app was closed.
   private fun replayCurrent() {
-    val callback = liveCallback ?: return
+    if (client == null) return
     val active = listener
-    when {
-      active != null -> callback.emitStep(active.stepPayload)
-      store.isActive ->
-        callback.emitStep(
-          StepEvent.build(
+    val payload =
+      when {
+        active != null -> active.stepPayload
+        store.isActive ->
+          StepEvent.bundle(
             store.accumulatedSteps,
             store.sessionStart,
             System.currentTimeMillis(),
             store.sensorType,
-          ),
-        )
-      else -> Unit
-    }
+          )
+        else -> return
+      }
+    sendToClient(MSG_STEP, payload)
   }
 
   private fun startForeground() {
@@ -454,7 +522,7 @@ class StepsForegroundService : Service(), StepsEventSink {
       )
     } catch (e: IllegalStateException) {
       // ForegroundServiceStartNotAllowedException (API 31+, an IllegalStateException): the OS refused
-      // a foreground-service start from the background (background-start restrictions). Caught via the
+      // a foreground service start from the background (background-start restrictions). Caught via the
       // stable supertype so the API-31-only class is never referenced on older devices.
       onStartForegroundFailed(e)
     } catch (e: SecurityException) {
@@ -621,46 +689,33 @@ class StepsForegroundService : Service(), StepsEventSink {
     listener?.stopService()
     listener = null
     listening = false
+    client = null
     super.onDestroy()
   }
 
   companion object {
     private val TAG: String = StepsForegroundService::class.java.name
 
-    // Used as process global to represent a sensor listener that is registered and emitting flag
-    // for the single service instance. The service runs in the app process, so the module can read
-    // this without binding, letting isCounting() report a session that is still alive after the
-    // app was swiped away (a sticky restart re-registers the listener and sets this as true again).
-    @Volatile
-    private var listening: Boolean = false
+    // Messenger protocol between the main process StepsSessionCoordinator (client) and this service
+    // (running in the :steps process). Commands to start/stop still travel as intents (only an intent
+    // confers the foreground service start grant), while all feedback (events, start/stop confirmations,
+    // listening state) flows back over the Messenger.
+    // main -> service:
+    const val MSG_REGISTER_CLIENT = 1 // msg.replyTo = the client's reply Messenger
+    const val MSG_UNREGISTER_CLIENT = 2
+    const val MSG_QUERY_STATE = 3 // msg.replyTo = where to send the one-off MSG_STATE reply
+    // service -> client:
+    const val MSG_STEP = 10 // msg.data = the StepEvent Bundle
+    const val MSG_ERROR = 11 // msg.data = { KEY_MESSAGE }
+    const val MSG_START_RESULT = 12 // msg.data = { KEY_TOKEN, KEY_REGISTERED }
+    const val MSG_STATE = 13 // msg.data = { KEY_LISTENING }
+    const val MSG_STOPPED = 14 // ACTION_STOP has been processed
 
-    fun isListening(): Boolean = listening
+    const val KEY_LISTENING = "listening"
+    const val KEY_TOKEN = "token"
+    const val KEY_REGISTERED = "registered"
+    const val KEY_MESSAGE = "message"
 
-    // Confirmation channel for the async start() promise. startForegroundService() only posts an
-    // intent, so the coordinator can't synchronously know when (or whether) the sensor registered.
-    // Each start() gets a globally monotonic token passed in the intent. After the service
-    // processes that ACTION_START it records the token and whether the listener ended up registered,
-    // so the coordinator can poll consumeStartResult() without binding. Process global (not bound to
-    // a service instance) so it survives an app/RN reload that hands the coordinator a fresh instance.
-    private val tokenSeq = java.util.concurrent.atomic.AtomicLong(0)
-
-    fun nextStartToken(): Long = tokenSeq.incrementAndGet()
-
-    @Volatile
-    private var lastStartToken: Long = Long.MIN_VALUE
-
-    @Volatile
-    private var lastStartListening: Boolean = false
-
-    // The registration result for token, or null when that ACTION_START has not been been processed yet.
-    fun consumeStartResult(token: Long): Boolean? =
-      if (lastStartToken >= token) lastStartListening else null
-
-    // Called by the service instance once it finishes processing an ACTION_START for token.
-    fun recordStartResult(token: Long, registered: Boolean) {
-      lastStartListening = registered
-      lastStartToken = token
-    }
     private const val CHANNEL_ID = "step_counter_background"
     private const val NOTIFICATION_ID = 0x57E95 // arbitrary, non-zero
 

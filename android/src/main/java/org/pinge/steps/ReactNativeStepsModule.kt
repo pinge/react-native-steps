@@ -50,7 +50,9 @@ class ReactNativeStepsModule(reactContext: ReactApplicationContext) : NativeReac
 
   @ReactMethod
   override fun isCounting(promise: Promise) {
-    promise.resolve(coordinator.isCounting())
+    // This is resolved asynchronously. The step counting session lives in the separate :steps process,
+    // so the coordinator queries it over the Messenger and resolves once the service replies.
+    coordinator.isCounting { listening -> promise.resolve(listening) }
   }
 
   @ReactMethod

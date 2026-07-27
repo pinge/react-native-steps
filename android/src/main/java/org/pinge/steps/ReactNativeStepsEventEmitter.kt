@@ -1,10 +1,11 @@
 package org.pinge.steps
 
+import android.os.Bundle
 import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
+import org.pinge.steps.counters.StepEvent
 import org.pinge.steps.counters.StepsEventSink
 
 /**
@@ -18,8 +19,11 @@ internal class ReactNativeStepsEventEmitter(private val appContext: ReactApplica
     val TAG_NAME: String = ReactNativeStepsEventEmitter::class.java.name
   }
 
-  override fun emitStep(payload: WritableMap) {
-    emitEvent("step", payload)
+  override fun emitStep(data: Bundle) {
+    // The payload arrives as a process neutral Bundle (from the :steps process over the Messenger, or
+    // from the in process fallback counter). We convert to a WritableMap here, in the main process,
+    // where React Native's Arguments/WritableNativeMap are available, before emitting to JavaScript.
+    emitEvent("step", StepEvent.toWritableMap(data))
   }
 
   override fun emitError(message: String) {
