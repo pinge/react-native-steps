@@ -1,5 +1,7 @@
 #import <React/RCTEventEmitter.h>
+#ifdef RCT_NEW_ARCH_ENABLED
 #import <ReactNativeStepsSpec/ReactNativeStepsSpec.h>
+#endif
 
 // Import the Swift implementation of the module, the generated Swift-to-ObjectiveC header, named
 // after the pod's product module. The __has_include guard covers both integration modes: framework
@@ -10,8 +12,42 @@
 #import "ReactNativeSteps-Swift.h"
 #endif
 
+#ifdef RCT_NEW_ARCH_ENABLED
+// Codegen owns method dispatch and argument conversion in the New Architecture.
+#define RNS_EXPORT_METHOD(signature) - (void)signature
+
+static NSDictionary *RNSNotificationDictionary(const JS::NativeReactNativeSteps::NotificationOptions &options) {
+  NSMutableDictionary *dictionary = [NSMutableDictionary dictionary];
+  // Assigning nil omits absent fields so the Swift core can apply its defaults.
+  dictionary[@"title"] = options.title();
+  dictionary[@"text"] = options.text();
+  dictionary[@"channel"] = options.channel();
+  dictionary[@"icon"] = options.icon();
+  dictionary[@"url"] = options.url();
+  return dictionary;
+}
+
+static NSDictionary *RNSGoalDictionary(const std::optional<JS::NativeReactNativeSteps::NativeGoal> &goal) {
+  if (!goal.has_value()) {
+    return nil;
+  }
+  return @{
+    @"period": goal->period(),
+    @"steps": @(goal->steps()),
+    @"notification": RNSNotificationDictionary(goal->notification())
+  };
+}
+#else
+// Keep bridge exports for consumers using the legacy architecture.
+#define RNS_EXPORT_METHOD(signature) RCT_EXPORT_METHOD(signature)
+#endif
+
 // Implements RNStepsEventSink so the Swift core can push step/error events through RCTEventEmitter.
+#ifdef RCT_NEW_ARCH_ENABLED
 @interface ReactNativeSteps : RCTEventEmitter <NativeReactNativeStepsSpec, RNStepsEventSink>
+#else
+@interface ReactNativeSteps : RCTEventEmitter <RNStepsEventSink>
+#endif
 @end
 
 @implementation ReactNativeSteps {
@@ -48,23 +84,37 @@ RCT_EXPORT_MODULE(ReactNativeSteps);
 
 #pragma mark - Public API
 
-RCT_EXPORT_METHOD(canCountSteps:(RCTPromiseResolveBlock)resolve
+RNS_EXPORT_METHOD(canCountSteps:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
   resolve(@([RNHardwareCapabilities canCountSteps]));
 }
 
-RCT_EXPORT_METHOD(getSensors:(RCTPromiseResolveBlock)resolve
+RNS_EXPORT_METHOD(getSensors:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
   resolve([RNHardwareCapabilities availableSensors]);
 }
 
+#ifdef RCT_NEW_ARCH_ENABLED
+- (void)start:(double)since
+ notification:(JS::NativeReactNativeSteps::NotificationOptions &)notification
+      cadence:(double)cadence
+      options:(JS::NativeReactNativeSteps::NativeStartOptions &)options
+      resolve:(RCTPromiseResolveBlock)resolve
+       reject:(RCTPromiseRejectBlock)reject {
+  NSDictionary *notificationDictionary = RNSNotificationDictionary(notification);
+  NSDictionary *goalDictionary = RNSGoalDictionary(options.goal());
+#else
 RCT_EXPORT_METHOD(start:(double)since
                   notification:(NSDictionary *)notification
                   cadence:(double)cadence
-                  goal:(NSDictionary *)goal
+                  options:(NSDictionary *)options
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
-  NSString *error = [_core startWithSince:since notification:notification cadence:cadence goal:goal];
+  NSDictionary *notificationDictionary = notification;
+  id goal = options[@"goal"];
+  NSDictionary *goalDictionary = goal == [NSNull null] ? nil : goal;
+#endif
+  NSString *error = [_core startWithSince:since notification:notificationDictionary cadence:cadence goal:goalDictionary];
   if (error) {
     reject(@"E_START_FAILED", error, nil);
   } else {
@@ -72,14 +122,14 @@ RCT_EXPORT_METHOD(start:(double)since
   }
 }
 
-RCT_EXPORT_METHOD(stop:(BOOL)clear
+RNS_EXPORT_METHOD(stop:(BOOL)clear
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
   [_core stopWithClear:clear];
   resolve(nil);
 }
 
-RCT_EXPORT_METHOD(isCounting:(RCTPromiseResolveBlock)resolve
+RNS_EXPORT_METHOD(isCounting:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
   resolve(@([_core isCounting]));
 }
@@ -104,3 +154,5 @@ RCT_EXPORT_METHOD(isCounting:(RCTPromiseResolveBlock)resolve
 #endif // RCT_NEW_ARCH_ENABLED
 
 @end
+
+#undef RNS_EXPORT_METHOD

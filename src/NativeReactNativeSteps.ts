@@ -146,7 +146,7 @@ export type NotificationOptions = {
 };
 
 /**
- * Codegen-facing shape of the goal config passed to `start` (or `null` when no goal is set).
+ * Codegen-facing shape of the goal config passed to `start` inside its options object.
  * We mirror the public `Goal` type but changed the `period` to `string` because React Native
  * codegen cannot express the `GoalPeriod` literal union and `notification` is always present
  * since it defaults to `{}` on the JavaScript side.
@@ -160,6 +160,13 @@ export type NativeGoal = {
   notification: NotificationOptions;
 };
 
+// Nullable top-level structs are emitted as C++ references on iOS. Keep the optional goal
+// inside a required struct so Codegen represents it as std::optional instead. Omit absent
+// goals rather than passing null: generated struct accessors check for nil, not NSNull.
+export type NativeStartOptions = {
+  goal?: NativeGoal;
+};
+
 export interface Spec extends TurboModule {
   /* ReactNativeStepsModule methods */
   canCountSteps(): Promise<boolean>;
@@ -167,7 +174,7 @@ export interface Spec extends TurboModule {
     since: number,
     notification: NotificationOptions,
     cadence: number,
-    goal: NativeGoal | null
+    options: NativeStartOptions
   ): Promise<void>;
   stop(clear: boolean): Promise<void>;
   isCounting(): Promise<boolean>;
@@ -182,4 +189,4 @@ export const VERSION = version;
 export const stepEventName = 'ReactNativeSteps.step';
 export const errorEventName = 'ReactNativeSteps.error';
 
-export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeSteps');
+export default TurboModuleRegistry.get<Spec>('ReactNativeSteps');

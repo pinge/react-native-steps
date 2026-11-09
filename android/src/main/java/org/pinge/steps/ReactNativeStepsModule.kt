@@ -32,7 +32,8 @@ class ReactNativeStepsModule(reactContext: ReactApplicationContext) : NativeReac
   }
 
   @ReactMethod
-  override fun start(since: Double, notification: ReadableMap, cadence: Double, goal: ReadableMap?, promise: Promise) {
+  override fun start(since: Double, notification: ReadableMap, cadence: Double, options: ReadableMap, promise: Promise) {
+    val goal = if (options.hasKey("goal") && !options.isNull("goal")) options.getMap("goal") else null
     coordinator.start(
       since.toLong(),
       StepsNotificationOptions.from(notification),

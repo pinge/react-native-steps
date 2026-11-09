@@ -7,7 +7,6 @@ import ReactNativeStepsModule, {
   type SensorType,
   type NotificationOptions,
   type NativeGoal,
-  type Spec,
   type StepEvent,
   type StepErrorEvent,
   type DeviceSensor,
@@ -32,18 +31,11 @@ ${LINKING_PLATFORM_HINT}
 
 If none of these fix the issue, please open an issue on the GitHub repository: https://github.com/pinge/react-native-steps`;
 
-const ReactNativeSteps = (
-  ReactNativeStepsModule
-    ? ReactNativeStepsModule
-    : new Proxy(
-        {},
-        {
-          get() {
-            throw new Error(LINKING_ERROR);
-          },
-        }
-      )
-) as Spec;
+if (!ReactNativeStepsModule) {
+  throw new Error(LINKING_ERROR);
+}
+
+const ReactNativeSteps = ReactNativeStepsModule;
 
 const StepEventEmitter = new NativeEventEmitter(ReactNativeSteps);
 
@@ -183,7 +175,7 @@ export function startCounting(options: StartCountingOptions): Promise<void> {
     resolvedSince,
     notification,
     cadence,
-    goal
+    goal === null ? {} : { goal }
   ).catch((error) => {
     clearSubscriptions();
     throw error;

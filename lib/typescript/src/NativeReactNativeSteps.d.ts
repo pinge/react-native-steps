@@ -112,7 +112,7 @@ export type NotificationOptions = {
     url?: string;
 };
 /**
- * Codegen-facing shape of the goal config passed to `start` (or `null` when no goal is set).
+ * Codegen-facing shape of the goal config passed to `start` inside its options object.
  * We mirror the public `Goal` type but changed the `period` to `string` because React Native
  * codegen cannot express the `GoalPeriod` literal union and `notification` is always present
  * since it defaults to `{}` on the JavaScript side.
@@ -125,9 +125,12 @@ export type NativeGoal = {
     /** Title and body translations, deep link URL and icon to render with the goal achieved notification when the 'steps' target is reached. */
     notification: NotificationOptions;
 };
+export type NativeStartOptions = {
+    goal?: NativeGoal;
+};
 export interface Spec extends TurboModule {
     canCountSteps(): Promise<boolean>;
-    start(since: number, notification: NotificationOptions, cadence: number, goal: NativeGoal | null): Promise<void>;
+    start(since: number, notification: NotificationOptions, cadence: number, options: NativeStartOptions): Promise<void>;
     stop(clear: boolean): Promise<void>;
     isCounting(): Promise<boolean>;
     getSensors(): Promise<NativeDeviceSensor[]>;
@@ -138,6 +141,6 @@ export declare const NAME = "ReactNativeSteps";
 export declare const VERSION: string;
 export declare const stepEventName = "ReactNativeSteps.step";
 export declare const errorEventName = "ReactNativeSteps.error";
-declare const _default: Spec;
+declare const _default: Spec | null | undefined;
 export default _default;
 //# sourceMappingURL=NativeReactNativeSteps.d.ts.map
